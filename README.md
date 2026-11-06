@@ -1,0 +1,63 @@
+# spaces-iot-bridge
+
+Makes devices on the hackspace's IoT broker appear to a
+[Cooperative Systems: Spaces](https://github.com/Cambridge-Hackspace/cooperative-systems-spaces)
+edge as **modules**, so that a Zigbee plug can switch a tool on the same lease a
+ToolGuard relay does.
+
+**Status: design.** No code yet. The design is
+[#1](https://github.com/Cambridge-Hackspace/spaces-iot-bridge/issues/1).
+
+## Why
+
+A Spaces edge talks to the modules in its building over the `resource/*` topics
+on its local broker: card readers ask about badges, power modules report in and
+hold a lease, and a module whose lease stops being renewed switches itself off.
+Purpose-built firmware such as
+[spaces-toolguard-firmware](https://github.com/Cambridge-Hackspace/spaces-toolguard-firmware)
+speaks that wire natively.
+
+An off-the-shelf device cannot. A Zigbee plug only understands
+Zigbee2MQTT's `{"state": "ON"}` on another broker, and has no identity on the
+platform, no way to pick out its own lease, and no watchdog. This service speaks
+the module wire on its behalf, and translates in both directions.
+
+The platform already models these devices (`countdown` and
+`holds_last_on_disconnect` in CS:S's `css_lib/src/capabilities.rs`); it has no
+code that drives them. This is that code, kept outside the edge so the edge does
+not change.
+
+```
+IoT broker                                         Spaces edge broker
+zigbee2mqtt/<friendly name>       <-->  iot-bridge  <-->  resource/lease
+zigbee2mqtt/<friendly name>/set                          resource/request/power
+                                                         resource/request/alive
+```
+
+## Failing safe
+
+A plug keeps its last state when its controller goes quiet. Left alone, that
+would let a tool stay energized after the bridge, its host or the network died.
+
+Where the plug supports Zigbee's on-with-timed-off, every lease renewal is sent
+as `{"state": "ON", "on_time": N}`: the plug switches *itself* off N seconds
+after the last renewal, whatever happened upstream. The bridge declares
+`countdown: true` for such a plug only after it has been tested. A plug that
+cannot do this is declared as such, and the platform then reports the tool as
+not fail-safe, honestly.
+
+`relay_on` is always what the plug reports, never what the bridge asked for. The
+edge waits for a `true` from an earlier start stage (an extractor, say) before it
+leases the next (the laser), so a bridge that echoed its own command could start
+a laser with no extraction.
+
+## Scope
+
+1. **`power`**: plugs, starting with the laser's fume extractor.
+2. Later: `sensor` (contact, leak or flow sensors feeding interlocks), once the
+   edge has a wire path for sensor conditions; a stop from a button; other
+   backends than Zigbee2MQTT.
+
+## Licence
+
+AGPL-3.0, the same as Spaces. See [LICENSE](LICENSE).

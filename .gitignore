@@ -1,0 +1,10 @@
+/target/
+*~
+.*.swp
+
+# Configuration holds each bridged device's platform token and broker
+# passwords. The sample is committed; the real file never is.
+/config.toml
+/config/
+*.env
+.env
