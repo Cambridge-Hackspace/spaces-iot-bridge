@@ -29,6 +29,14 @@ struct Cli {
 enum Cmd {
     /// Bridge every configured device until stopped.
     Run,
+    /// Measure whether a plug honours on_time, and whether re-sending it
+    /// while ON extends the deadline. Prints; writes nothing. Run with the
+    /// bridge stopped, on a plug nothing is using.
+    Probe {
+        /// The device's `name` in the config.
+        #[arg(long)]
+        device: String,
+    },
     /// Claim an invite for one device and persist its identity. Once.
     Register {
         /// The device's `name` in the config.
@@ -52,6 +60,17 @@ async fn main() -> Result<()> {
     spaces_iot_bridge::tls::install_crypto_provider();
     let cli = <Cli as clap::Parser>::parse();
     let cfg = config::load(&cli.config)?;
+    if let Cmd::Probe { device } = &cli.cmd {
+        let d = cfg
+            .devices
+            .iter()
+            .find(|d| &d.name == device)
+            .with_context(|| {
+                format!("no [[device]] named {device:?} in {}", cli.config.display())
+            })?;
+        let creds = config::load_credentials(&cfg.iot.credentials)?;
+        return probe_live(&cfg.iot.broker, &creds, &cfg.iot.base, d).await;
+    }
     if let Cmd::Register { device, invite } = &cli.cmd {
         let d = cfg
             .devices
@@ -240,4 +259,141 @@ async fn run_device(
             }
         }
     }
+}
+
+/// The probe's driver: two halves, timestamps collected, verdicts printed.
+async fn probe_live(
+    broker: &str,
+    creds: &config::Credentials,
+    base: &str,
+    d: &DeviceEntry,
+) -> Result<()> {
+    use spaces_iot_bridge::probe::{self, Verdict, ON_TIME_S};
+    let state_topic = z2m::state_topic(base, &d.friendly);
+    let (tx, mut rx) = mpsc::channel::<Delivered>(64);
+    let conn = Connection::start(
+        "probe",
+        "spaces-iot-bridge-probe",
+        broker,
+        Some(creds),
+        vec![state_topic.clone()],
+        tx,
+    )?;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Drain whatever the broker replays on subscribe: a retained state is not
+    // the plug speaking, and it would otherwise look like an instant ON.
+    while let Ok(m) = rx.try_recv() {
+        if m.retained {
+            info!(
+                "probe: discarded a retained {} on {}",
+                String::from_utf8_lossy(&m.payload),
+                m.topic
+            );
+        }
+    }
+
+    info!("probe: half 1 -- does the plug honour on_time={ON_TIME_S}?");
+    let o1 = probe_half(&conn, &mut rx, base, d, None).await?;
+    let v1 = probe::verdict_countdown(o1, ON_TIME_S);
+    // Make sure it is OFF and settled before half 2.
+    conn.publish(
+        &z2m::set_topic(base, &d.friendly),
+        &z2m::set_payload(false, None),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    while rx.try_recv().is_ok() {}
+
+    let rearm = Duration::from_millis(u64::from(ON_TIME_S) * 500);
+    info!(
+        "probe: half 2 -- does re-sending at {} ms extend the deadline?",
+        rearm.as_millis()
+    );
+    let o2 = probe_half(&conn, &mut rx, base, d, Some(rearm)).await?;
+    let v2 = probe::verdict_rearm(o2, ON_TIME_S, rearm.as_millis() as u64);
+    conn.publish(
+        &z2m::set_topic(base, &d.friendly),
+        &z2m::set_payload(false, None),
+    )
+    .await?;
+
+    let show = |name: &str, v: &Verdict| match v {
+        Verdict::Pass { off_after_ms } => println!("  PASS  {name}: OFF at {off_after_ms} ms"),
+        Verdict::Fail(why) => println!("  FAIL  {name}: {why}"),
+    };
+    println!("probe {}:", d.name);
+    show("honours on_time", &v1);
+    show("re-arm extends the deadline", &v2);
+    if v1.passed() && v2.passed() {
+        println!(
+            "both halves pass: you may set `countdown = true` for {} in the config, by hand.",
+            d.name
+        );
+    } else {
+        println!("leave `countdown = false` for {}: the bridge's own watchdog will be its only fail-safe, and the tool will honestly report power_fails_safe = false.", d.name);
+    }
+    Ok(())
+}
+
+/// One half of the probe: send `ON on_time`, optionally re-send it at
+/// `rearm_at`, and record when the plug reports ON and then OFF, in ms from
+/// the first send. A free function rather than a closure: it borrows the
+/// receiver mutably, and a closure returning a future cannot lend it twice.
+async fn probe_half(
+    conn: &Connection,
+    rx: &mut mpsc::Receiver<Delivered>,
+    base: &str,
+    d: &DeviceEntry,
+    rearm_at: Option<Duration>,
+) -> Result<spaces_iot_bridge::probe::Observed> {
+    use spaces_iot_bridge::probe::{self, Observed, ON_TIME_S};
+    let expected_ms = rearm_at.map_or(0, |r| r.as_millis() as u64) + u64::from(ON_TIME_S) * 1_000;
+    let budget = probe::wait_budget(expected_ms);
+    let set_topic = z2m::set_topic(base, &d.friendly);
+    let t0 = Instant::now();
+    conn.publish(&set_topic, &z2m::set_payload(true, Some(ON_TIME_S)))
+        .await?;
+    let mut on_at = None;
+    let mut off_at = None;
+    let mut resent = false;
+    loop {
+        let elapsed = t0.elapsed();
+        if elapsed > budget {
+            break;
+        }
+        if let Some(r) = rearm_at {
+            if !resent && elapsed >= r {
+                conn.publish(&set_topic, &z2m::set_payload(true, Some(ON_TIME_S)))
+                    .await?;
+                info!(
+                    "probe: re-sent ON on_time={ON_TIME_S} at {} ms",
+                    elapsed.as_millis()
+                );
+                resent = true;
+            }
+        }
+        let Ok(Some(m)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await else {
+            continue;
+        };
+        if m.retained {
+            continue; // a replay is not the plug speaking
+        }
+        if let Some(z2m::Incoming::State(rep)) =
+            z2m::classify(base, &d.friendly, &m.topic, &m.payload, m.retained)
+        {
+            let at = t0.elapsed().as_millis() as u64;
+            if rep.on && on_at.is_none() {
+                on_at = Some(at);
+                info!("probe: plug reports ON at {at} ms");
+            } else if !rep.on && on_at.is_some() && off_at.is_none() {
+                off_at = Some(at);
+                info!("probe: plug reports OFF at {at} ms");
+                break;
+            }
+        }
+    }
+    Ok(Observed {
+        on_at_ms: on_at,
+        off_at_ms: off_at,
+    })
 }
