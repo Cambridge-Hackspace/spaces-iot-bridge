@@ -18,3 +18,11 @@ serde_json = "1"
 toml = "0.8"
 anyhow = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# default-features = false: the default is `use-rustls`, which would pull a TLS
+# provider -- and the aws-lc-sys/cmake question with it -- into a service whose
+# brokers are LAN mqtt:// by design (#1). No TLS feature means no provider and
+# no PQ question, because there is no TLS. If a TLS broker ever appears, the
+# answer is aws-lc-rs and cmake in the tenant, per the post-quantum principle.
+rumqttc = { version = "0.25", default-features = false }
+tokio = { version = "1.36", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
