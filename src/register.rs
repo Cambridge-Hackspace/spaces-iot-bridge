@@ -8,7 +8,11 @@
 //! and `capabilities` carries the enforcement descriptors CS:S models --
 //! `countdown` and `holds_last_on_disconnect` -- which the crate's
 //! `Capabilities` has no fields for. The request is serialised and those two
-//! are set on the JSON, which is what the server reads.
+//! are set on the JSON, which is what the server reads. Both gaps are filed:
+//! Cambridge-Hackspace/spaces-firmware#2 (the fields), and
+//! Cambridge-Hackspace/cooperative-systems-spaces#209 (the server's default for
+//! `holds_last_on_disconnect` reads as "fails safe", which is why this bridge
+//! answers it explicitly rather than relying on the default).
 
 use std::path::Path;
 
