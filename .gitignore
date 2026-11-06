@@ -8,3 +8,6 @@
 /config/
 *.env
 .env
+
+# reaper collects a run's results here; they are evidence, not source.
+/out/
