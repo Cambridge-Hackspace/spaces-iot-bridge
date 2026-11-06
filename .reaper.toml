@@ -26,7 +26,7 @@ cmd = "CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET carg
 
 [sync]
 # Built on the development host for a different OS; rebuilt in the cache.
-exclude = ["/target/"]
+exclude = ["/target/", "/out/"]
 
 [resources]
 cores = 2
