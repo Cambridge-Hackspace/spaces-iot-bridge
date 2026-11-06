@@ -1,0 +1,42 @@
+# spaces-iot-bridge configuration. This SAMPLE is committed; the real file is
+# /config.toml, which .gitignore keeps out because it names credential files.
+# Every decision here is explained in issue #1.
+
+[edge]
+broker = "mqtt://127.0.0.1:1883"
+# One account on the edge's broker for the whole bridge: write
+# resource/request/#, read resource/lease. The edge reads device_id from the
+# payload and never from the login, so per-device logins would buy nothing.
+credentials = "/var/lib/spaces-iot-bridge/edge.toml"     # 0600
+
+[iot]
+broker = "mqtt://jarvis:1883"
+# A dedicated user, scoped by topic to the bridged devices only -- here that
+# works, because Zigbee2MQTT's topics are per device.
+credentials = "/var/lib/spaces-iot-bridge/iot.toml"      # 0600
+base = "zigbee2mqtt"
+
+[[device]]
+name      = "extractor"
+backend   = "zigbee2mqtt"
+friendly  = "hackspace/south_wall/plug/filters"
+# The plug's 64-bit IEEE address. NOT what registers as mac_address -- that
+# column is 17 characters and this is 23; the bridge registers with the host's
+# own MAC and keeps this here and in the device name.
+ieee      = "00:12:4b:00:1c:a1:b2:c3"
+role      = "power"
+resource  = "laser"
+# Written by registration, 0600. Nothing re-registers on its own.
+identity  = "/var/lib/spaces-iot-bridge/identities/extractor.toml"
+# From `bridge probe extractor`, written BY HAND after both halves pass: the
+# plug honours on_time, AND re-sending it while ON extends the deadline.
+countdown = true
+# The plug's countdown is the backstop, sized for the device, not the lease.
+# The edge regrants every second; re-arming on every grant is one Zigbee write
+# per second per plug. The bridge's own watchdog honours the 3 s lease TTL.
+on_time_s = 60
+rearm_s   = 15
+# A leased extractor going Unknown or Off -> after a 10 s debounce -> a `stop`
+# on the resource. Stage confirmation is sticky, so nothing else catches
+# extraction failing mid-job.
+stop_resource_on_loss = true

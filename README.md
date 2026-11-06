@@ -5,8 +5,19 @@ Makes devices on the hackspace's IoT broker appear to a
 edge as **modules**, so that a Zigbee plug can switch a tool on the same lease a
 ToolGuard relay does.
 
-**Status: design.** No code yet. The design is
-[#1](https://github.com/Cambridge-Hackspace/spaces-iot-bridge/issues/1).
+**Status: implementation, from a settled design.** The design, and the basis
+for each of its decisions, is
+[#1](https://github.com/Cambridge-Hackspace/spaces-iot-bridge/issues/1) -- the
+decisions themselves are in
+[its design comment](https://github.com/Cambridge-Hackspace/spaces-iot-bridge/issues/1#issuecomment-6697291588).
+The work is broken out as #2 (scaffold and reaper tenant), #3 (the pure core),
+#4 (Zigbee2MQTT adapter), #5 (edge adapter), #6 (`probe`), #7 (stop-on-loss),
+#8 (deployment) and #9 (what only hardware can answer). The core comes first;
+its API is the contract the adapters are written against.
+
+`reaper test` in this directory builds and tests the crate in a pinned Rust
+container; `config.sample.toml` is the committed shape of the real
+`/config.toml`, which never is.
 
 ## Why
 

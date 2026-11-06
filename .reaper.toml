@@ -1,0 +1,33 @@
+# Reaper tenant for the bridge: build and test the crate in a digest-pinned
+# Rust container on the generic Ubuntu guest. The one git dependency,
+# spaces-device, is public, so the guest fetches it with no credential.
+#
+# What this does NOT cover: anything with a broker. The pure core needs none;
+# the adapters' integration tier (a real mosquitto, the real edge in the CS:S
+# e2e stack) is its own issue and will want `exec = "host"`.
+
+schema = 1
+project = "spaces-iot-bridge"
+
+guests = ["ubuntu-26.04"]
+exec = "container"
+
+[build]
+# docker.io/library/rust:1.97, resolved 2026-08-13 and known to run on this
+# guest: it is the same image reaper's own tenant builds in.
+image = "docker.io/library/rust@sha256:3382bd20aa942806c533e9a73cd000474fb3ef173f71e684cc9b942675781769"
+cmd = "CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET cargo build --locked --tests"
+cache = ["cargo", "target"]
+
+[run]
+# No pipe into tee: /bin/sh may be dash. Redirect, capture the real status,
+# echo the log for the live view, re-raise.
+cmd = "CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET cargo test --locked > \"$REAPER_OUT\"/cargo-test.log 2>&1; s=$?; cat \"$REAPER_OUT\"/cargo-test.log; exit $s"
+
+[sync]
+# Built on the development host for a different OS; rebuilt in the cache.
+exclude = ["/target/"]
+
+[resources]
+cores = 2
+ram_gb = 4

@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (/reaper/cache/target/debug/deps/spaces_iot_bridge-139f979847a38e86)
+
+running 3 tests
+test core::tests::a_live_report_is_believed ... ok
+test core::tests::a_retained_report_is_not_the_plug_speaking ... ok
+test core::tests::unknown_is_omitted_not_false ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/reaper/cache/target/debug/deps/spaces_iot_bridge-a7d1ba1fd9b30dc5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests spaces_iot_bridge
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
