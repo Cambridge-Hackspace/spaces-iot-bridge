@@ -1,0 +1,32 @@
+# systemd USER unit for the bridge, on the edge VM beside css-edge.
+#
+#   mkdir -p ~/.config/systemd/user && cp deploy/spaces-iot-bridge.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now spaces-iot-bridge
+#   loginctl enable-linger $USER      # so it runs without a login session
+#
+# Restart=always, deliberately: the bridge is stateless, and the plug's own
+# countdown is the fail-safe while it is down. A bridge that stayed dead
+# would be worse than one that came back -- the edge marks every bridged
+# module offline after 5 s either way, so a restart loop costs nothing the
+# outage had not already cost.
+
+[Unit]
+Description=Spaces IoT bridge: IoT-broker devices as Spaces modules
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/spaces-iot-bridge --config %h/.config/spaces-iot-bridge/config.toml run
+Restart=always
+RestartSec=2
+# Every state transition is INFO; every anomaly WARN; every omitted relay_on
+# says why. journalctl --user -u spaces-iot-bridge -f is the first place to look.
+Environment=RUST_LOG=info
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/spaces-iot-bridge
+
+[Install]
+WantedBy=default.target
