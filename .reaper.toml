@@ -16,7 +16,10 @@ exec = "container"
 # docker.io/library/rust:1.97, resolved 2026-08-13 and known to run on this
 # guest: it is the same image reaper's own tenant builds in.
 image = "docker.io/library/rust@sha256:3382bd20aa942806c533e9a73cd000474fb3ef173f71e684cc9b942675781769"
-cmd = "CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET cargo build --locked --tests"
+# cmake is aws-lc-sys's one build requirement beyond a C compiler, and the
+# stock Rust image does not promise it. Installing it is the tenant's business,
+# as reaper's own manifest says of its apt line.
+cmd = "apt-get -qq update && apt-get -qq install -y cmake > /dev/null && CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET cargo build --locked --tests"
 cache = ["cargo", "target"]
 
 [run]

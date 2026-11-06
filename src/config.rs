@@ -9,10 +9,17 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Config {
+    pub server: Server,
     pub edge: Broker,
     pub iot: IotBroker,
     #[serde(rename = "device", default)]
     pub devices: Vec<DeviceEntry>,
+}
+
+/// css-server, for registration. Everything else goes over the edge's broker.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Server {
+    pub url: String,
 }
 
 /// A broker, as `mqtt://host:port`, and the file holding its login.
@@ -133,6 +140,7 @@ mod tests {
         // The sample is the documentation of the shape. If it stops parsing,
         // the documentation is wrong, and this is where that is noticed.
         let cfg = parse(include_str!("../config.sample.toml")).expect("config.sample.toml");
+        assert_eq!(cfg.server.url, "https://spaces.example.org");
         assert_eq!(cfg.iot.base, "zigbee2mqtt");
         assert_eq!(cfg.devices.len(), 1);
         let d = &cfg.devices[0];

@@ -6,4 +6,6 @@
 pub mod config;
 pub mod core;
 pub mod mqtt;
+pub mod register;
+pub mod tls;
 pub mod z2m;
