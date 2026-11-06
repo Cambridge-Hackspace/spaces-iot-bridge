@@ -20,9 +20,20 @@ cmd = "CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET carg
 cache = ["cargo", "target"]
 
 [run]
-# No pipe into tee: /bin/sh may be dash. Redirect, capture the real status,
-# echo the log for the live view, re-raise.
-cmd = "CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET cargo test --locked > \"$REAPER_OUT\"/cargo-test.log 2>&1; s=$?; cat \"$REAPER_OUT\"/cargo-test.log; exit $s"
+# The broker tier runs here too, against a real mosquitto started inside the
+# container from Debian's package -- the same arrangement reaper's own tenant
+# uses for its apt-only dependencies: the environment is the tenant's business.
+# `--include-ignored` is the opt-in for that tier; the unit suite is hermetic and
+# the broker tests are not, so they are #[ignore]d everywhere a broker is not
+# promised. No pipe into tee: /bin/sh may be dash. Redirect, capture the real
+# status, echo the log for the live view, re-raise.
+cmd = """
+apt-get -qq update && apt-get -qq install -y mosquitto > /dev/null && \
+printf 'listener 1883 127.0.0.1\nallow_anonymous true\npersistence false\n' > /tmp/mosq.conf && \
+(mosquitto -c /tmp/mosq.conf > /tmp/mosq.log 2>&1 &) && sleep 1 && \
+BRIDGE_TEST_BROKER=127.0.0.1:1883 \
+CARGO_HOME=$REAPER_CACHE_CARGO CARGO_TARGET_DIR=$REAPER_CACHE_TARGET \
+cargo test --locked -- --include-ignored > "$REAPER_OUT"/cargo-test.log 2>&1; s=$?; cat "$REAPER_OUT"/cargo-test.log; exit $s"""
 
 [sync]
 # Built on the development host for a different OS; rebuilt in the cache.
