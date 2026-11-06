@@ -15,6 +15,31 @@ use spaces_iot_bridge::z2m;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+#[derive(clap::Parser)]
+#[command(name = "spaces-iot-bridge", version, about)]
+struct Cli {
+    /// The config file. Its shape is config.sample.toml.
+    #[arg(long, default_value = "/config.toml")]
+    config: PathBuf,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(clap::Subcommand)]
+enum Cmd {
+    /// Bridge every configured device until stopped.
+    Run,
+    /// Claim an invite for one device and persist its identity. Once.
+    Register {
+        /// The device's `name` in the config.
+        #[arg(long)]
+        device: String,
+        /// The invite code from the platform (an administrator mints one).
+        #[arg(long)]
+        invite: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -22,11 +47,28 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse()?),
         )
         .init();
-    let path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/config.toml"));
-    let cfg = config::load(&path)?;
+    // Before the one thing that builds a TLS config. rustls panics, not errors,
+    // without a provider.
+    spaces_iot_bridge::tls::install_crypto_provider();
+    let cli = <Cli as clap::Parser>::parse();
+    let cfg = config::load(&cli.config)?;
+    if let Cmd::Register { device, invite } = &cli.cmd {
+        let d = cfg
+            .devices
+            .iter()
+            .find(|d| &d.name == device)
+            .with_context(|| {
+                format!("no [[device]] named {device:?} in {}", cli.config.display())
+            })?;
+        let id = spaces_iot_bridge::register::register(&cfg.server.url, d, invite).await?;
+        info!(
+            "{}: registered as {}; identity written to {}",
+            d.name,
+            id.device_id,
+            d.identity.display()
+        );
+        return Ok(());
+    }
     info!(
         "spaces-iot-bridge {} with {} device(s)",
         env!("CARGO_PKG_VERSION"),

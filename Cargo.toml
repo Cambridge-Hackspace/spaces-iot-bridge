@@ -25,4 +25,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # no PQ question, because there is no TLS. If a TLS broker ever appears, the
 # answer is aws-lc-rs and cmake in the tenant, per the post-quantum principle.
 rumqttc = { version = "0.25", default-features = false }
+# HTTPS, for the one call that needs it: POST /api/devices/register. The
+# post-quantum recipe CS:S's own CLI uses: reqwest with the NO-PROVIDER rustls
+# feature, and the provider named here, explicitly, so it is this crate's
+# decision -- `aws_lc_rs` because ML-KEM lives only there, `prefer-post-quantum`
+# named because reqwest pulls rustls with default features off.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider"] }
+rustls = { version = "0.23", features = ["aws_lc_rs", "prefer-post-quantum"] }
+# The bridge host's own MAC, which is what registers: the platform's column is
+# 17 characters and a Zigbee IEEE address is 23 (#1 q2).
+mac_address = "1.1"
+clap = { version = "4", features = ["derive"] }
 tokio = { version = "1.36", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }

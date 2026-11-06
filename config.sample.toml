@@ -2,6 +2,10 @@
 # /config.toml, which .gitignore keeps out because it names credential files.
 # Every decision here is explained in issue #1.
 
+[server]
+# css-server itself, for the one HTTPS call a device makes: registration.
+url = "https://spaces.example.org"
+
 [edge]
 broker = "mqtt://127.0.0.1:1883"
 # One account on the edge's broker for the whole bridge: write
