@@ -1,23 +1,22 @@
 //! Claiming an invite for one bridged device: `POST /api/devices/register`,
 //! and the identity it returns, persisted where the config says.
 //!
-//! Built on `spaces_device::registration` for the request and the reply, with
-//! two things that crate cannot say at v0.4.0 and this bridge must:
-//! `platform` is `linux` (the crate hardcodes "other", an ESP32's honest
-//! answer; the server validates against exactly windows|linux|macos|other),
-//! and `capabilities` carries the enforcement descriptors CS:S models --
-//! `countdown` and `holds_last_on_disconnect` -- which the crate's
-//! `Capabilities` has no fields for. The request is serialised and those two
-//! are set on the JSON, which is what the server reads. Both gaps are filed:
-//! Cambridge-Hackspace/spaces-firmware#2 (the fields), and
-//! Cambridge-Hackspace/cooperative-systems-spaces#209 (the server's default for
-//! `holds_last_on_disconnect` reads as "fails safe", which is why this bridge
-//! answers it explicitly rather than relying on the default).
+//! Built on `spaces_device::registration` for the request and the reply. The
+//! request is the crate's own `RegisterRequest::new` with `platform` set to
+//! `linux` (the server validates against exactly windows|linux|macos|other)
+//! and the enforcement descriptors declared through `Capabilities::declared`
+//! -- both arrived in spaces-firmware v0.5.0 (spaces-firmware#2); before that
+//! this module serialised the request and overwrote the JSON by hand.
+//!
+//! `holds_last_on_disconnect` is declared explicitly and true, never left to
+//! the server's default, because what the default means is the server's
+//! business and has changed once already (cooperative-systems-spaces#209): a
+//! bridge that knows the answer says it.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use spaces_device::registration::{parse_reply, RegisterRequest, PATH};
+use spaces_device::registration::{parse_reply, Capabilities, Enforcement, RegisterRequest, PATH};
 
 use crate::config::{DeviceEntry, Identity};
 
@@ -34,22 +33,20 @@ pub fn host_mac() -> Result<String> {
 /// The registration body for one device. Pure, so it is tested without a
 /// server: what goes on the wire is exactly this.
 pub fn request_body(d: &DeviceEntry, invite: &str, mac: &str, version: &str) -> serde_json::Value {
-    let req = RegisterRequest::with_roles(&[d.role.as_str()], invite, &d.name, mac, version, None);
-    let mut v = serde_json::to_value(&req).expect("a RegisterRequest serialises");
-    v["platform"] = serde_json::json!("linux");
-    v["capabilities"] = serde_json::json!({
-        "roles": [d.role],
+    let enforcement = Enforcement {
+        // It cannot cut its own output on a local condition; it has no inputs.
+        local_inputs: vec![],
+        local_inhibit: false,
         // From `bridge probe`, by hand (#1 q1). Declared only when measured.
-        "countdown": d.countdown,
+        countdown: d.countdown,
         // A smart plug keeps its relay state when its link drops. That is the
         // physical truth of the device class, and it is what makes `countdown`
         // the thing that lets it fail safe at all.
-        "holds_last_on_disconnect": true,
-        // It cannot cut its own output on a local condition; it has no inputs.
-        "local_inhibit": false,
-        "local_inputs": [],
-    });
-    v
+        holds_last_on_disconnect: true,
+    };
+    let caps = Capabilities::declared(&[d.role.as_str()], enforcement);
+    let req = RegisterRequest::new(caps, invite, &d.name, mac, version, "linux", None);
+    serde_json::to_value(&req).expect("a RegisterRequest serialises")
 }
 
 /// Claim the invite and persist the identity. Refuses to overwrite an
@@ -131,8 +128,8 @@ mod tests {
 
     #[test]
     fn the_request_says_linux_and_declares_what_a_plug_is() {
-        // Two things the firmware crate cannot say. The mutants are leaving
-        // platform as the crate's "other", and not overwriting capabilities.
+        // The mutants are leaving platform as the crate's "other", and
+        // declaring roles only (the crate's legacy form).
         let tmp = tempdir();
         let d = extractor(&tmp);
         let v = request_body(&d, "INVITE", "02:00:00:00:00:01", "0.1.0");
@@ -144,6 +141,20 @@ mod tests {
         );
         assert_eq!(v["capabilities"]["holds_last_on_disconnect"], true);
         assert_eq!(v["capabilities"]["local_inhibit"], false);
+        // The whole object, as a literal: this is the bridge's half of the
+        // cross-repo contract (the server pins the same names in css_lib),
+        // and it is what the crate's `declared` form must flatten to. The
+        // mutant is declaring roles only and letting the server default the rest.
+        assert_eq!(
+            v["capabilities"],
+            serde_json::json!({
+                "roles": ["power"],
+                "local_inputs": [],
+                "local_inhibit": false,
+                "countdown": true,
+                "holds_last_on_disconnect": true,
+            })
+        );
         assert_eq!(v["device_code"], "INVITE");
         assert_eq!(v["mac_address"], "02:00:00:00:00:01");
         assert_eq!(v["name"], "extractor");
