@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use spaces_device::wire::topic;
 use spaces_iot_bridge::config::{self, DeviceEntry};
 use spaces_iot_bridge::core::{Command, Device, DeviceConfig};
-use spaces_iot_bridge::mqtt::{Connection, Delivered};
+use spaces_iot_bridge::mqtt::{self, Connection, Delivered};
 use spaces_iot_bridge::z2m;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -115,7 +115,7 @@ async fn main() -> Result<()> {
     }
     let iot = Arc::new(Connection::start(
         "iot",
-        "spaces-iot-bridge",
+        &mqtt::client_id("iot"),
         &cfg.iot.broker,
         Some(&iot_creds),
         iot_topics,
@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
     // the payload and every module sees every lease.
     let edge = Arc::new(Connection::start(
         "edge",
-        "spaces-iot-bridge",
+        &mqtt::client_id("edge"),
         &cfg.edge.broker,
         Some(&edge_creds),
         topic::SUBSCRIPTIONS.iter().map(|s| s.to_string()).collect(),
@@ -273,7 +273,7 @@ async fn probe_live(
     let (tx, mut rx) = mpsc::channel::<Delivered>(64);
     let conn = Connection::start(
         "probe",
-        "spaces-iot-bridge-probe",
+        &mqtt::client_id("probe"),
         broker,
         Some(creds),
         vec![state_topic.clone()],
