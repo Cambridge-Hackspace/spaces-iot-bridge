@@ -1,7 +1,17 @@
-//! Zigbee2MQTT, as pure translation. Topics and payloads in both directions;
-//! no sockets here.
+//! Zigbee2MQTT as a backend: topics and payloads in both directions as pure
+//! translation, plus the two thin pieces that touch the broker -- a [`Router`]
+//! that says which device a delivered message belongs to and what it means,
+//! and a [`Handle`] that carries out the core's commands for one device.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::Result;
+
+use crate::backend::Incoming;
+use crate::config::DeviceEntry;
 use crate::core::Report;
+use crate::mqtt::{Connection, Delivered};
 
 /// `<base>/<friendly>` -- the device's state topic.
 pub fn state_topic(base: &str, friendly: &str) -> String {
@@ -15,21 +25,6 @@ pub fn set_topic(base: &str, friendly: &str) -> String {
 }
 pub fn get_topic(base: &str, friendly: &str) -> String {
     format!("{base}/{friendly}/get")
-}
-
-/// What arrived on one of a device's topics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Incoming {
-    State(Report),
-    Availability {
-        online: bool,
-    },
-    /// An empty payload on the state topic: a broker forgetting a retained
-    /// state (that is how one is cleared). Not a report and not malformed;
-    /// nothing to act on and nothing to warn about.
-    Cleared,
-    /// On a topic of ours but not something we understand. Logged, not acted on.
-    Unrecognised,
 }
 
 /// Classify a message for a device, given its base and friendly name.
@@ -99,6 +94,78 @@ pub fn set_payload(on: bool, on_time_s: Option<u32>) -> String {
 /// The `/get` payload: ask for a live state report.
 pub fn get_payload() -> &'static str {
     r#"{"state":""}"#
+}
+
+/// Which device a message on the IoT broker belongs to, and what it says.
+/// Pure: built once from the config, consulted per message.
+pub struct Router {
+    base: String,
+    /// state topic -> device name, and availability topic -> device name.
+    by_topic: HashMap<String, String>,
+    friendly: HashMap<String, String>,
+}
+
+impl Router {
+    pub fn new(base: &str, devices: &[DeviceEntry]) -> Self {
+        let mut by_topic = HashMap::new();
+        let mut friendly = HashMap::new();
+        for d in devices {
+            by_topic.insert(state_topic(base, &d.friendly), d.name.clone());
+            by_topic.insert(availability_topic(base, &d.friendly), d.name.clone());
+            friendly.insert(d.name.clone(), d.friendly.clone());
+        }
+        Self {
+            base: base.to_string(),
+            by_topic,
+            friendly,
+        }
+    }
+
+    /// The topics the IoT connection must subscribe to for these devices.
+    pub fn subscriptions(&self) -> Vec<String> {
+        let mut t: Vec<String> = self.by_topic.keys().cloned().collect();
+        t.sort();
+        t
+    }
+
+    /// `(device name, what it said)`, or `None` for a message on no device's
+    /// topic -- including our own `/set` and `/get` echoes.
+    pub fn route(&self, m: &Delivered) -> Option<(&str, Incoming)> {
+        let name = self.by_topic.get(&m.topic)?;
+        let friendly = &self.friendly[name];
+        classify(&self.base, friendly, &m.topic, &m.payload, m.retained).map(|i| (name.as_str(), i))
+    }
+}
+
+/// The drive half for one device: `/set` and `/get` on the IoT connection.
+pub struct Handle {
+    conn: Arc<Connection>,
+    set_topic: String,
+    get_topic: String,
+}
+
+impl Handle {
+    pub fn new(conn: Arc<Connection>, base: &str, friendly: &str) -> Self {
+        Self {
+            conn,
+            set_topic: set_topic(base, friendly),
+            get_topic: get_topic(base, friendly),
+        }
+    }
+
+    pub async fn set(&self, on: bool, on_time_s: Option<u32>) -> Result<()> {
+        self.conn
+            .publish(&self.set_topic, &set_payload(on, on_time_s))
+            .await
+    }
+
+    pub async fn get(&self) -> Result<()> {
+        self.conn.publish(&self.get_topic, get_payload()).await
+    }
+
+    pub fn describe(&self) -> String {
+        format!("zigbee2mqtt {}", self.set_topic.trim_end_matches("/set"))
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +259,128 @@ mod tests {
         );
         assert_eq!(set_payload(true, None), r#"{"state":"ON"}"#);
         assert_eq!(set_payload(false, Some(60)), r#"{"state":"OFF"}"#);
+    }
+
+    fn devices() -> Vec<DeviceEntry> {
+        let mk = |name: &str, friendly: &str| DeviceEntry {
+            name: name.into(),
+            backend: crate::config::BackendKind::Zigbee2Mqtt,
+            friendly: friendly.into(),
+            ieee: None,
+            role: "power".into(),
+            resource: format!("{name}-tool"),
+            identity: "/nonexistent".into(),
+            countdown: false,
+            on_time_s: 60,
+            rearm_s: 15,
+            stop_resource_on_loss: false,
+        };
+        vec![
+            mk("extractor", "plug/extractor"),
+            mk("heater", "plug/heater"),
+        ]
+    }
+
+    fn delivered(topic: &str, payload: &[u8], retained: bool) -> Delivered {
+        Delivered {
+            topic: topic.into(),
+            payload: payload.to_vec(),
+            retained,
+        }
+    }
+
+    #[test]
+    fn the_router_hands_each_message_to_the_device_whose_topic_it_is() {
+        // This replaces two HashMaps and a lookup that lived untested in
+        // main.rs. The mutants: keying by friendly name alone (a different
+        // base would then match), and returning the FIRST device for any
+        // known topic.
+        let r = Router::new(B, &devices());
+        let (who, what) = r
+            .route(&delivered(
+                "zigbee2mqtt/plug/heater",
+                br#"{"state":"OFF"}"#,
+                false,
+            ))
+            .expect("the heater's state topic routes");
+        assert_eq!(who, "heater");
+        assert_eq!(
+            what,
+            Incoming::State(Report {
+                on: false,
+                retained: false
+            })
+        );
+        let (who, what) = r
+            .route(&delivered(
+                "zigbee2mqtt/plug/extractor/availability",
+                b"offline",
+                false,
+            ))
+            .expect("the extractor's availability topic routes");
+        assert_eq!(who, "extractor");
+        assert_eq!(what, Incoming::Availability { online: false });
+        // The retain flag survives the trip.
+        let (_, what) = r
+            .route(&delivered(
+                "zigbee2mqtt/plug/heater",
+                br#"{"state":"ON"}"#,
+                true,
+            ))
+            .unwrap();
+        assert_eq!(
+            what,
+            Incoming::State(Report {
+                on: true,
+                retained: true
+            })
+        );
+    }
+
+    #[test]
+    fn the_router_ignores_what_is_nobodys_and_our_own_echoes() {
+        let r = Router::new(B, &devices());
+        assert!(r
+            .route(&delivered("zigbee2mqtt/plug/other", b"{}", false))
+            .is_none());
+        assert!(
+            r.route(&delivered("zigbee2mqtt/plug/heater/set", b"{}", false))
+                .is_none(),
+            "our own /set echo is not a report"
+        );
+        assert!(r
+            .route(&delivered("other/plug/heater", br#"{"state":"ON"}"#, false))
+            .is_none());
+        // The base is the config's, not a constant: under another base the
+        // same friendly name lives on another topic. The mutant is a router
+        // that ignores `base` and assumes "zigbee2mqtt".
+        let other = Router::new("z2m-east", &devices());
+        assert_eq!(
+            other
+                .route(&delivered(
+                    "z2m-east/plug/heater",
+                    br#"{"state":"ON"}"#,
+                    false
+                ))
+                .map(|(n, _)| n),
+            Some("heater")
+        );
+        assert!(other
+            .route(&delivered(
+                "zigbee2mqtt/plug/heater",
+                br#"{"state":"ON"}"#,
+                false
+            ))
+            .is_none());
+        // And it subscribes to exactly the state and availability topics.
+        assert_eq!(
+            r.subscriptions(),
+            vec![
+                "zigbee2mqtt/plug/extractor",
+                "zigbee2mqtt/plug/extractor/availability",
+                "zigbee2mqtt/plug/heater",
+                "zigbee2mqtt/plug/heater/availability",
+            ]
+        );
     }
 }

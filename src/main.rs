@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use spaces_device::wire::topic;
+use spaces_iot_bridge::backend::{Backend, Incoming};
 use spaces_iot_bridge::config::{self, DeviceEntry};
 use spaces_iot_bridge::core::{Command, Device, DeviceConfig};
 use spaces_iot_bridge::mqtt::{self, Connection, Delivered};
@@ -107,18 +108,17 @@ async fn main() -> Result<()> {
         );
     }
 
+    // The IoT side: one Zigbee2MQTT connection and a router that says which
+    // device a message is for. Every device is Zigbee2MQTT today; the per-device
+    // `Backend` below is where another backend's handle would go (#20).
     let (iot_tx, mut iot_rx) = mpsc::channel::<Delivered>(256);
-    let mut iot_topics = Vec::new();
-    for d in &cfg.devices {
-        iot_topics.push(z2m::state_topic(&cfg.iot.base, &d.friendly));
-        iot_topics.push(z2m::availability_topic(&cfg.iot.base, &d.friendly));
-    }
+    let router = z2m::Router::new(&cfg.iot.base, &cfg.devices);
     let iot = Arc::new(Connection::start(
         "iot",
         &mqtt::client_id("iot"),
         &cfg.iot.broker,
         Some(&iot_creds),
-        iot_topics,
+        router.subscriptions(),
         iot_tx,
     )?);
 
@@ -136,38 +136,34 @@ async fn main() -> Result<()> {
 
     // One task per device. Everything it needs arrives on its own channel.
     let mut devices: HashMap<String, mpsc::Sender<Input>> = HashMap::new();
-    let mut by_state_topic: HashMap<String, String> = HashMap::new();
-    let mut by_avail_topic: HashMap<String, String> = HashMap::new();
     for d in cfg.devices.clone() {
         let (tx, rx) = mpsc::channel::<Input>(64);
-        by_state_topic.insert(z2m::state_topic(&cfg.iot.base, &d.friendly), d.name.clone());
-        by_avail_topic.insert(
-            z2m::availability_topic(&cfg.iot.base, &d.friendly),
-            d.name.clone(),
-        );
         devices.insert(d.name.clone(), tx);
         let identity = identities[&d.name].clone();
-        tokio::spawn(run_device(
-            d,
-            cfg.iot.base.clone(),
-            identity.device_id,
-            rx,
-            iot.clone(),
-            edge.clone(),
-        ));
+        let backend = match d.backend {
+            config::BackendKind::Zigbee2Mqtt => {
+                Backend::Zigbee2Mqtt(z2m::Handle::new(iot.clone(), &cfg.iot.base, &d.friendly))
+            }
+        };
+        tokio::spawn(run_device(d, identity.device_id, rx, backend, edge.clone()));
     }
 
-    // Routing. IoT messages go to the one device whose topic it is; every edge
-    // message goes to every device, because every module sees every lease and
-    // each one filters by its own device_id (core, two_devices test).
-    let base = cfg.iot.base.clone();
+    // Routing. IoT messages go to the one device whose topic it is, already
+    // classified; every edge message goes to every device, because every
+    // module sees every lease and each one filters by its own device_id (core,
+    // two_devices test).
     loop {
         tokio::select! {
             Some(m) = iot_rx.recv() => {
-                let name = by_state_topic.get(&m.topic).or_else(|| by_avail_topic.get(&m.topic));
-                match name.and_then(|n| devices.get(n)) {
-                    Some(tx) => { let _ = tx.send(Input::Iot(m)).await; }
-                    None => warn!("iot: message on {} matches no device (base {base})", m.topic),
+                match router.route(&m) {
+                    Some((name, Incoming::Unrecognised)) => warn!("{name}: unrecognised payload on {}", m.topic),
+                    Some((name, Incoming::Cleared)) => debug!("{name}: retained state cleared on {}", m.topic),
+                    Some((name, incoming)) => {
+                        if let Some(tx) = devices.get(name) {
+                            let _ = tx.send(Input::Device(incoming)).await;
+                        }
+                    }
+                    None => warn!("iot: message on {} matches no device", m.topic),
                 }
             }
             Some(m) = edge_rx.recv() => {
@@ -181,16 +177,16 @@ async fn main() -> Result<()> {
 }
 
 enum Input {
-    Iot(Delivered),
+    /// From the device's backend, already in the core's terms.
+    Device(Incoming),
     Edge(Delivered),
 }
 
 async fn run_device(
     d: DeviceEntry,
-    base: String,
     device_id: String,
     mut rx: mpsc::Receiver<Input>,
-    iot: Arc<Connection>,
+    backend: Backend,
     edge: Arc<Connection>,
 ) {
     let mut dev = Device::new(DeviceConfig {
@@ -210,37 +206,28 @@ async fn run_device(
         let cmds = tokio::select! {
             _ = ticker.tick() => dev.tick(now()),
             Some(input) = rx.recv() => match input {
-                Input::Iot(m) => match z2m::classify(&base, &d.friendly, &m.topic, &m.payload, m.retained) {
-                    Some(z2m::Incoming::State(r)) => dev.report(r, now()),
-                    Some(z2m::Incoming::Availability { online }) => dev.availability(online, now()),
-                    Some(z2m::Incoming::Unrecognised) => { warn!("{}: unrecognised payload on {}", d.name, m.topic); vec![] }
-                    Some(z2m::Incoming::Cleared) => { debug!("{}: retained state cleared on {}", d.name, m.topic); vec![] }
-                    None => vec![],
-                },
+                Input::Device(Incoming::State(r)) => dev.report(r, now()),
+                Input::Device(Incoming::Availability { online }) => dev.availability(online, now()),
+                // The router logs these itself and does not forward them.
+                Input::Device(Incoming::Cleared | Incoming::Unrecognised) => vec![],
                 Input::Edge(m) => dev.edge_message(&m.topic, &m.payload, now()),
             },
         };
         for c in cmds {
             let r = match c {
-                Command::Z2mSet { on, on_time_s } => {
+                Command::Set { on, on_time_s } => {
                     info!(
-                        "{}: set {}{}",
+                        "{}: set {}{} ({})",
                         d.name,
                         if on { "ON" } else { "OFF" },
                         on_time_s
                             .map(|t| format!(" on_time={t}"))
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        backend.describe()
                     );
-                    iot.publish(
-                        &z2m::set_topic(&base, &d.friendly),
-                        &z2m::set_payload(on, on_time_s),
-                    )
-                    .await
+                    backend.set(on, on_time_s).await
                 }
-                Command::Z2mGet => {
-                    iot.publish(&z2m::get_topic(&base, &d.friendly), z2m::get_payload())
-                        .await
-                }
+                Command::Get => backend.get().await,
                 Command::Publish { topic, payload } => edge.publish(topic, &payload).await,
                 Command::Stop { resource } => {
                     warn!("{}: stopping {resource}", d.name);
@@ -379,7 +366,7 @@ async fn probe_half(
         if m.retained {
             continue; // a replay is not the plug speaking
         }
-        if let Some(z2m::Incoming::State(rep)) =
+        if let Some(Incoming::State(rep)) =
             z2m::classify(base, &d.friendly, &m.topic, &m.payload, m.retained)
         {
             let at = t0.elapsed().as_millis() as u64;

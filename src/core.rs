@@ -19,8 +19,8 @@
 //!    optimistic `true` would fire the laser before extraction is running.
 //! 2. **A retained report is not the plug speaking.** The broker replays the
 //!    last thing a topic said to every new subscriber, of unknown age, looking
-//!    fresh. It yields `Unknown`, and the adapter is told to `/get` so a live
-//!    reply resolves it in under a second.
+//!    fresh. It yields `Unknown`, and the backend is told to ask for a live
+//!    report so a reply resolves it in under a second.
 //! 3. **Re-arming is on the plug's clock, not the lease's.** The edge regrants
 //!    every second; re-sending `on_time` on each grant is a Zigbee write per
 //!    second per plug. The Module's `Set` is transition-only, so the wrapper
@@ -75,13 +75,16 @@ pub fn relay_on(known: KnownState) -> Option<bool> {
 }
 
 /// What the adapters must do, in order. The bridge's own vocabulary; the
-/// Module's [`Action`]s are translated into it and never leak out.
+/// Module's [`Action`]s are translated into it and never leak out, and no
+/// backend's wire appears in it either -- `Set` and `Get` are carried out by
+/// whichever [`crate::backend::Backend`] owns the device.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// `{"state": "ON"|"OFF", "on_time"?: N}` to the plug's `/set`.
-    Z2mSet { on: bool, on_time_s: Option<u32> },
-    /// `{"state": ""}` to the plug's `/get`: ask for a live report.
-    Z2mGet,
+    /// Switch the device; `on_time_s` is a countdown for it to run itself,
+    /// present only when the core has decided it may be trusted with one.
+    Set { on: bool, on_time_s: Option<u32> },
+    /// Ask the device for a live state report.
+    Get,
     /// To the edge broker. `relay_on` in a power report is already rewritten.
     Publish {
         topic: &'static str,
@@ -168,7 +171,7 @@ impl Device {
             out.push(Command::Log(
                 "retained state ignored; asking for a live report".into(),
             ));
-            out.push(Command::Z2mGet);
+            out.push(Command::Get);
         } else {
             // A live report answers whatever was outstanding, whether or not it
             // agrees with it. Disagreement is logged, not corrected: the plug
@@ -221,7 +224,7 @@ impl Device {
                     on,
                 } => {
                     let on_time_s = (on && self.cfg.countdown).then_some(self.cfg.on_time_s);
-                    out.push(Command::Z2mSet { on, on_time_s });
+                    out.push(Command::Set { on, on_time_s });
                     self.expecting = Some((on, now));
                     if on {
                         self.last_rearm = Some(now);
@@ -293,7 +296,7 @@ impl Device {
                 .is_none_or(|t| now.saturating_sub(t) >= u64::from(self.cfg.rearm_s) * 1_000);
             if due {
                 self.last_rearm = Some(now);
-                out.push(Command::Z2mSet {
+                out.push(Command::Set {
                     on: true,
                     on_time_s: Some(self.cfg.on_time_s),
                 });
@@ -351,7 +354,7 @@ mod tests {
     fn sets(cmds: &[Command]) -> Vec<(bool, Option<u32>)> {
         cmds.iter()
             .filter_map(|c| match c {
-                Command::Z2mSet { on, on_time_s } => Some((*on, *on_time_s)),
+                Command::Set { on, on_time_s } => Some((*on, *on_time_s)),
                 _ => None,
             })
             .collect()
@@ -402,7 +405,7 @@ mod tests {
 
     #[test]
     fn a_retained_report_asks_for_a_live_one() {
-        // The mutant is dropping the Z2mGet push in `report`.
+        // The mutant is dropping the Get push in `report`.
         let mut d = Device::new(cfg());
         let out = d.report(
             Report {
@@ -411,7 +414,7 @@ mod tests {
             },
             0,
         );
-        assert!(out.contains(&Command::Z2mGet), "{out:?}");
+        assert!(out.contains(&Command::Get), "{out:?}");
         assert_eq!(d.known(), KnownState::Unknown);
         // ...and the live answer resolves it.
         d.report(
