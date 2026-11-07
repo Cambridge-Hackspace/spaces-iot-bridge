@@ -1022,8 +1022,8 @@ dependencies = [
 
 [[package]]
 name = "spaces-device"
-version = "0.5.0"
-source = "git+https://github.com/Cambridge-Hackspace/spaces-firmware?tag=v0.5.0#2df01e03622c29f2a857766d7f7d9f322789c949"
+version = "0.5.1"
+source = "git+https://github.com/Cambridge-Hackspace/spaces-firmware?tag=v0.5.1#b70bb9ea9b2eb5047ebc0facc6bd3fd3b99b5df9"
 dependencies = [
  "serde",
  "serde_json",
