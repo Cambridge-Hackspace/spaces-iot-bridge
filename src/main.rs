@@ -13,7 +13,7 @@ use spaces_iot_bridge::core::{Command, Device, DeviceConfig};
 use spaces_iot_bridge::mqtt::{self, Connection, Delivered};
 use spaces_iot_bridge::z2m;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(clap::Parser)]
 #[command(name = "spaces-iot-bridge", version, about)]
@@ -214,6 +214,7 @@ async fn run_device(
                     Some(z2m::Incoming::State(r)) => dev.report(r, now()),
                     Some(z2m::Incoming::Availability { online }) => dev.availability(online, now()),
                     Some(z2m::Incoming::Unrecognised) => { warn!("{}: unrecognised payload on {}", d.name, m.topic); vec![] }
+                    Some(z2m::Incoming::Cleared) => { debug!("{}: retained state cleared on {}", d.name, m.topic); vec![] }
                     None => vec![],
                 },
                 Input::Edge(m) => dev.edge_message(&m.topic, &m.payload, now()),

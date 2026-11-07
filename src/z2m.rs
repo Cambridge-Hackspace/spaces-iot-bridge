@@ -24,6 +24,10 @@ pub enum Incoming {
     Availability {
         online: bool,
     },
+    /// An empty payload on the state topic: a broker forgetting a retained
+    /// state (that is how one is cleared). Not a report and not malformed;
+    /// nothing to act on and nothing to warn about.
+    Cleared,
     /// On a topic of ours but not something we understand. Logged, not acted on.
     Unrecognised,
 }
@@ -45,6 +49,9 @@ pub fn classify(
         );
     }
     if topic == state_topic(base, friendly) {
+        if payload.is_empty() {
+            return Some(Incoming::Cleared);
+        }
         return Some(parse_state(payload).map_or(Incoming::Unrecognised, |on| {
             Incoming::State(Report { on, retained })
         }));
@@ -135,6 +142,23 @@ mod tests {
         );
         assert_eq!(
             classify(B, F, &t, b"maybe", false),
+            Some(Incoming::Unrecognised)
+        );
+    }
+
+    #[test]
+    fn an_empty_state_payload_is_a_retained_clear_not_an_unrecognised_report() {
+        // The CS:S e2e stage clears its retained ON with an empty publish and
+        // the bridge WARNed "unrecognised payload" (#18). Empty is how a
+        // retained message is forgotten; it is neither a report nor garbage.
+        // The mutant is removing the is_empty arm: empty then falls to
+        // parse_state, fails to parse, and is Unrecognised again.
+        let t = state_topic(B, F);
+        assert_eq!(classify(B, F, &t, b"", true), Some(Incoming::Cleared));
+        assert_eq!(classify(B, F, &t, b"", false), Some(Incoming::Cleared));
+        // Only on the state topic: an empty availability is still not a word.
+        assert_eq!(
+            classify(B, F, &availability_topic(B, F), b"", false),
             Some(Incoming::Unrecognised)
         );
     }
