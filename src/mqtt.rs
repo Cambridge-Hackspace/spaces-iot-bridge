@@ -21,6 +21,27 @@ pub struct Delivered {
     pub retained: bool,
 }
 
+/// The MQTT client id for one of this process's connections.
+///
+/// Two things have to be true of it, and the first run of the CS:S e2e stage
+/// found out what happens when they are not. A broker allows ONE session per
+/// client id: a second connection with the same id evicts the first, which
+/// reconnects and evicts the second, and so on at the reconnect interval. The
+/// bridge's `iot` and `edge` connections both carried the literal
+/// "spaces-iot-bridge", which was invisible on two brokers and a one-second
+/// flap on one -- and one broker for Zigbee2MQTT and the edge is an ordinary
+/// hackspace deployment. So: distinct per ROLE within a process, and distinct
+/// per HOST across processes (two bridges on one edge broker is also ordinary).
+/// The host is named by the same MAC that names it at registration; a host
+/// with no MAC falls back to its pid, which registration would have refused
+/// anyway.
+pub fn client_id(role: &str) -> String {
+    let instance = crate::register::host_mac()
+        .map(|m| m.replace(':', ""))
+        .unwrap_or_else(|_| std::process::id().to_string());
+    format!("bridge-{role}-{instance}")
+}
+
 pub struct Connection {
     pub client: AsyncClient,
 }
@@ -96,6 +117,30 @@ impl Connection {
 /// real broker; the tenant starts a mosquitto and sets it. `#[ignore]` is the
 /// opt-in, not a skip: the unit suite is hermetic and this one is not.
 #[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    #[test]
+    fn each_role_gets_its_own_client_id_and_one_host_gets_one_instance() {
+        // The mutant is a constant id. The instance half must be the same for
+        // both, or two roles on one host would look like two hosts.
+        let iot = client_id("iot");
+        let edge = client_id("edge");
+        assert_ne!(iot, edge);
+        assert!(iot.starts_with("bridge-iot-"), "{iot}");
+        assert!(edge.starts_with("bridge-edge-"), "{edge}");
+        assert_eq!(
+            iot.trim_start_matches("bridge-iot-"),
+            edge.trim_start_matches("bridge-edge-")
+        );
+        assert!(
+            !iot.contains(':'),
+            "a MAC is written without separators: {iot}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod broker_tests {
     use super::*;
 
@@ -164,5 +209,56 @@ mod broker_tests {
             .publish(topic, QoS::AtLeastOnce, true, "".as_bytes())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs BRIDGE_TEST_BROKER=host:port"]
+    async fn the_bridges_two_connections_coexist_on_one_broker() {
+        // The defect the first e2e run found: both connections carried the same
+        // client id, and on one broker each connect evicted the other every
+        // second. Two subscribers with the ids the bridge really uses must BOTH
+        // see every one of a run of live publishes; a flapping connection
+        // misses some. The mutant is `client_id` returning the same string for
+        // both roles.
+        let url = broker().expect("BRIDGE_TEST_BROKER");
+        let topic = format!("bridge-test/{}/coexist", std::process::id());
+        let (tx_a, mut rx_a) = mpsc::channel(64);
+        let (tx_b, mut rx_b) = mpsc::channel(64);
+        let id_a = client_id("iot");
+        let id_b = client_id("edge");
+        let _a = Connection::start("iot", &id_a, &url, None, vec![topic.clone()], tx_a).unwrap();
+        let _b = Connection::start("edge", &id_b, &url, None, vec![topic.clone()], tx_b).unwrap();
+        // Long enough for an eviction cycle (reconnect backoff is 1 s) to show.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        let (tx0, _rx0) = mpsc::channel(8);
+        let writer =
+            Connection::start("writer", "bridge-test-writer2", &url, None, vec![], tx0).unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        const N: usize = 6;
+        for i in 0..N {
+            writer.publish(&topic, &format!("{i}")).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+        let mut seen_a = Vec::new();
+        let mut seen_b = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline && (seen_a.len() < N || seen_b.len() < N) {
+            tokio::select! {
+                Some(m) = rx_a.recv() => seen_a.push(String::from_utf8_lossy(&m.payload).to_string()),
+                Some(m) = rx_b.recv() => seen_b.push(String::from_utf8_lossy(&m.payload).to_string()),
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+        assert_eq!(
+            seen_a.len(),
+            N,
+            "iot connection missed publishes: {seen_a:?}"
+        );
+        assert_eq!(
+            seen_b.len(),
+            N,
+            "edge connection missed publishes: {seen_b:?}"
+        );
     }
 }
