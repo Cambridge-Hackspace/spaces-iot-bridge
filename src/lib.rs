@@ -3,6 +3,7 @@
 //!
 //! Layout: `core` is pure -- per-device state as functions over a record, no
 //! I/O -- and is where the safety lives; the adapters that feed it are thin.
+pub mod backend;
 pub mod config;
 pub mod core;
 pub mod mqtt;

@@ -37,10 +37,18 @@ pub struct IotBroker {
     pub base: String,
 }
 
+/// Which backend owns a device. Serde refuses an unknown one by name, so the
+/// old `ensure!` on the string is now the deserializer's job.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    Zigbee2Mqtt,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct DeviceEntry {
     pub name: String,
-    pub backend: String,
+    pub backend: BackendKind,
     pub friendly: String,
     pub ieee: Option<String>,
     pub role: String,
@@ -104,12 +112,6 @@ pub fn parse(text: &str) -> Result<Config> {
     let cfg: Config = toml::from_str(text)?;
     for d in &cfg.devices {
         anyhow::ensure!(
-            d.backend == "zigbee2mqtt",
-            "device {}: backend {:?} is not supported",
-            d.name,
-            d.backend
-        );
-        anyhow::ensure!(
             d.role == "power",
             "device {}: role {:?} is not supported yet (#1: power first)",
             d.name,
@@ -157,6 +159,30 @@ mod tests {
             .replace("role      = \"power\"", "role      = \"sensor\"");
         let err = parse(&text).expect_err("sensor is #1's 'later'");
         assert!(err.to_string().contains("sensor"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_backend_is_refused_by_name() {
+        // The string `ensure!` that did this became serde's job when the
+        // backend became an enum (#20, rung 1). The mutant is a catch-all
+        // variant: `#[serde(other)]` would accept anything and silently run
+        // a device on the wrong backend.
+        let text = include_str!("../config.sample.toml").replace(
+            "backend   = \"zigbee2mqtt\"",
+            "backend   = \"homeassistant\"",
+        );
+        let err = parse(&text).expect_err("homeassistant is not wired yet");
+        assert!(
+            err.to_string().contains("homeassistant") && err.to_string().contains("zigbee2mqtt"),
+            "the error should name both what was given and what is accepted: {err}"
+        );
+        assert_eq!(
+            parse(include_str!("../config.sample.toml"))
+                .unwrap()
+                .devices[0]
+                .backend,
+            BackendKind::Zigbee2Mqtt
+        );
     }
 
     #[test]
