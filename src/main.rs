@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use spaces_device::wire::topic;
 use spaces_iot_bridge::backend::{Backend, Incoming};
-use spaces_iot_bridge::config::{self, DeviceEntry};
+use spaces_iot_bridge::config::{self, BackendKind, DeviceEntry};
 use spaces_iot_bridge::core::{Command, Device, DeviceConfig};
+use spaces_iot_bridge::ha;
 use spaces_iot_bridge::mqtt::{self, Connection, Delivered};
 use spaces_iot_bridge::z2m;
 use tokio::sync::mpsc;
@@ -69,8 +70,14 @@ async fn main() -> Result<()> {
             .with_context(|| {
                 format!("no [[device]] named {device:?} in {}", cli.config.display())
             })?;
-        let creds = config::load_credentials(&cfg.iot.credentials)?;
-        return probe_live(&cfg.iot.broker, &creds, &cfg.iot.base, d).await;
+        anyhow::ensure!(
+            d.backend == BackendKind::Zigbee2Mqtt,
+            "{}: `probe` measures a plug over Zigbee2MQTT; nothing measures a Home Assistant entity's countdown yet (#20)",
+            d.name
+        );
+        let iot = cfg.iot.as_ref().context("probe needs an [iot] section")?;
+        let creds = config::load_credentials(&iot.credentials)?;
+        return probe_live(&iot.broker, &creds, &iot.base, d).await;
     }
     if let Cmd::Register { device, invite } = &cli.cmd {
         let d = cfg
@@ -96,7 +103,6 @@ async fn main() -> Result<()> {
     );
     anyhow::ensure!(!cfg.devices.is_empty(), "no [[device]] configured");
 
-    let iot_creds = config::load_credentials(&cfg.iot.credentials)?;
     let edge_creds = config::load_credentials(&cfg.edge.credentials)?;
 
     // Identities: registered by #5; refused here with the path, not guessed.
@@ -108,19 +114,60 @@ async fn main() -> Result<()> {
         );
     }
 
-    // The IoT side: one Zigbee2MQTT connection and a router that says which
-    // device a message is for. Every device is Zigbee2MQTT today; the per-device
-    // `Backend` below is where another backend's handle would go (#20).
+    // The Zigbee2MQTT side: one connection and a router that says which device
+    // a message is for. Only when a device needs it -- a Home Assistant-only
+    // bridge never touches the IoT broker. The sender is kept alive either way
+    // so the receive arm below pends rather than closing.
     let (iot_tx, mut iot_rx) = mpsc::channel::<Delivered>(256);
-    let router = z2m::Router::new(&cfg.iot.base, &cfg.devices);
-    let iot = Arc::new(Connection::start(
-        "iot",
-        &mqtt::client_id("iot"),
-        &cfg.iot.broker,
-        Some(&iot_creds),
-        router.subscriptions(),
-        iot_tx,
-    )?);
+    let has_z2m = cfg
+        .devices
+        .iter()
+        .any(|d| d.backend == BackendKind::Zigbee2Mqtt);
+    let mut z2m_side: Option<(z2m::Router, Arc<Connection>, String)> = None;
+    if has_z2m {
+        let iot_cfg = cfg
+            .iot
+            .as_ref()
+            .expect("parse requires [iot] for a zigbee2mqtt device");
+        let iot_creds = config::load_credentials(&iot_cfg.credentials)?;
+        let router = z2m::Router::new(&iot_cfg.base, &cfg.devices);
+        let conn = Arc::new(Connection::start(
+            "iot",
+            &mqtt::client_id("iot"),
+            &iot_cfg.broker,
+            Some(&iot_creds),
+            router.subscriptions(),
+            iot_tx.clone(),
+        )?);
+        z2m_side = Some((router, conn, iot_cfg.base.clone()));
+    }
+
+    // The Home Assistant side (#20): one WebSocket to one HA, shared by every
+    // device it owns; events arrive already classified, keyed by entity.
+    let (ha_tx, mut ha_rx) = mpsc::channel::<(String, Incoming)>(256);
+    let ha_devices: Vec<&DeviceEntry> = cfg
+        .devices
+        .iter()
+        .filter(|d| d.backend == BackendKind::Homeassistant)
+        .collect();
+    let mut ha_conn: Option<Arc<ha::Connection>> = None;
+    let mut by_entity: HashMap<String, String> = HashMap::new();
+    if !ha_devices.is_empty() {
+        let ha_cfg = cfg
+            .homeassistant
+            .as_ref()
+            .expect("parse requires [homeassistant] for a homeassistant device");
+        let token = config::load_ha_token(&ha_cfg.token_file)?;
+        for d in &ha_devices {
+            by_entity.insert(d.entity().to_string(), d.name.clone());
+        }
+        ha_conn = Some(Arc::new(ha::Connection::start(
+            ha_cfg.url.clone(),
+            token,
+            by_entity.keys().cloned().collect(),
+            ha_tx.clone(),
+        )));
+    }
 
     let (edge_tx, mut edge_rx) = mpsc::channel::<Delivered>(256);
     // One connection for every identity (#1 q4): the edge reads device_id from
@@ -141,9 +188,18 @@ async fn main() -> Result<()> {
         devices.insert(d.name.clone(), tx);
         let identity = identities[&d.name].clone();
         let backend = match d.backend {
-            config::BackendKind::Zigbee2Mqtt => {
-                Backend::Zigbee2Mqtt(z2m::Handle::new(iot.clone(), &cfg.iot.base, &d.friendly))
+            BackendKind::Zigbee2Mqtt => {
+                let (_, conn, base) = z2m_side
+                    .as_ref()
+                    .expect("a zigbee2mqtt device has the Zigbee2MQTT side");
+                Backend::Zigbee2Mqtt(z2m::Handle::new(conn.clone(), base, d.friendly()))
             }
+            BackendKind::Homeassistant => Backend::HomeAssistant(ha::Handle::new(
+                ha_conn
+                    .clone()
+                    .expect("a homeassistant device has the Home Assistant side"),
+                d.entity(),
+            )),
         };
         tokio::spawn(run_device(d, identity.device_id, rx, backend, edge.clone()));
     }
@@ -152,9 +208,11 @@ async fn main() -> Result<()> {
     // classified; every edge message goes to every device, because every
     // module sees every lease and each one filters by its own device_id (core,
     // two_devices test).
+    let router = z2m_side.as_ref().map(|(r, _, _)| r);
     loop {
         tokio::select! {
             Some(m) = iot_rx.recv() => {
+                let Some(router) = router else { continue };
                 match router.route(&m) {
                     Some((name, Incoming::Unrecognised)) => warn!("{name}: unrecognised payload on {}", m.topic),
                     Some((name, Incoming::Cleared)) => debug!("{name}: retained state cleared on {}", m.topic),
@@ -164,6 +222,12 @@ async fn main() -> Result<()> {
                         }
                     }
                     None => warn!("iot: message on {} matches no device", m.topic),
+                }
+            }
+            Some((entity, incoming)) = ha_rx.recv() => {
+                match by_entity.get(&entity).and_then(|n| devices.get(n)) {
+                    Some(tx) => { let _ = tx.send(Input::Device(incoming)).await; }
+                    None => warn!("ha: event for {entity} matches no device"),
                 }
             }
             Some(m) = edge_rx.recv() => {
@@ -257,7 +321,7 @@ async fn probe_live(
     d: &DeviceEntry,
 ) -> Result<()> {
     use spaces_iot_bridge::probe::{self, Verdict, ON_TIME_S};
-    let state_topic = z2m::state_topic(base, &d.friendly);
+    let state_topic = z2m::state_topic(base, d.friendly());
     let (tx, mut rx) = mpsc::channel::<Delivered>(64);
     let conn = Connection::start(
         "probe",
@@ -285,7 +349,7 @@ async fn probe_live(
     let v1 = probe::verdict_countdown(o1, ON_TIME_S);
     // Make sure it is OFF and settled before half 2.
     conn.publish(
-        &z2m::set_topic(base, &d.friendly),
+        &z2m::set_topic(base, d.friendly()),
         &z2m::set_payload(false, None),
     )
     .await?;
@@ -300,7 +364,7 @@ async fn probe_live(
     let o2 = probe_half(&conn, &mut rx, base, d, Some(rearm)).await?;
     let v2 = probe::verdict_rearm(o2, ON_TIME_S, rearm.as_millis() as u64);
     conn.publish(
-        &z2m::set_topic(base, &d.friendly),
+        &z2m::set_topic(base, d.friendly()),
         &z2m::set_payload(false, None),
     )
     .await?;
@@ -337,7 +401,7 @@ async fn probe_half(
     use spaces_iot_bridge::probe::{self, Observed, ON_TIME_S};
     let expected_ms = rearm_at.map_or(0, |r| r.as_millis() as u64) + u64::from(ON_TIME_S) * 1_000;
     let budget = probe::wait_budget(expected_ms);
-    let set_topic = z2m::set_topic(base, &d.friendly);
+    let set_topic = z2m::set_topic(base, d.friendly());
     let t0 = Instant::now();
     conn.publish(&set_topic, &z2m::set_payload(true, Some(ON_TIME_S)))
         .await?;
@@ -367,7 +431,7 @@ async fn probe_half(
             continue; // a replay is not the plug speaking
         }
         if let Some(Incoming::State(rep)) =
-            z2m::classify(base, &d.friendly, &m.topic, &m.payload, m.retained)
+            z2m::classify(base, d.friendly(), &m.topic, &m.payload, m.retained)
         {
             let at = t0.elapsed().as_millis() as u64;
             if rep.on && on_at.is_none() {

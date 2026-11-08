@@ -14,6 +14,7 @@ broker = "mqtt://127.0.0.1:1883"
 credentials = "/var/lib/spaces-iot-bridge/edge.toml"     # 0600
 
 [iot]
+# Needed only when a [[device]] has `backend = "zigbee2mqtt"`.
 broker = "mqtt://jarvis:1883"
 # A dedicated user, scoped by topic to the bridged devices only -- here that
 # works, because Zigbee2MQTT's topics are per device.
@@ -43,4 +44,35 @@ rearm_s   = 15
 # A leased extractor going Unknown or Off -> after a 10 s debounce -> a `stop`
 # on the resource. Stage confirmation is sticky, so nothing else catches
 # extraction failing mid-job.
+stop_resource_on_loss = true
+
+# ---------------------------------------------------------------------------
+# Home Assistant (#20): on-prem, over its WebSocket API. Needed only when a
+# [[device]] has `backend = "homeassistant"`. A dedicated non-admin user that
+# can only log in from the local network, and a long-lived access token from
+# it, alone in a 0600 file. HA has no per-entity permissions: this token can
+# drive every lock in that HA, not only the one below.
+[homeassistant]
+url        = "ws://ha.local:8123/api/websocket"
+token_file = "/var/lib/spaces-iot-bridge/ha-token"            # 0600
+
+# A door whose lock only Home Assistant can reach. It is a POWER module on the
+# door resource -- the edge leases a door's power bindings for exactly the
+# strike pulse -- and the bridge registers it as `power` AND `strike`, so the
+# door has a pulse at all (a door with no strike binding has a pulse of zero
+# and would never lease it). Bind it as both in Resource Wiring; give the
+# strike binding the pulse you want and hold_open_access = false.
+# Lease granted -> lock.unlock; withdrawn -> lock.lock. Unlocked is "on".
+[[device]]
+name      = "workshop-door"
+backend   = "homeassistant"
+entity    = "lock.workshop_door"
+role      = "power"
+resource  = "workshop-door"
+identity  = "/var/lib/spaces-iot-bridge/identities/workshop-door.toml"
+# Nothing can measure a Home Assistant entity's countdown, so none is claimed:
+# the lock relocks on the lease and holds its last state if the link drops.
+# (countdown, on_time_s and rearm_s are not used for this backend.)
+# A leased lock that HA cannot see for 10 s -> a `stop` on the door, which
+# ends the session and withdraws the lease: fail secure.
 stop_resource_on_loss = true

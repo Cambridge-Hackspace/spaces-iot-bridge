@@ -33,6 +33,7 @@
 //! unavailable. The bridge cannot see them; it must not pretend otherwise.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -288,6 +289,44 @@ impl Connection {
     pub async fn update_entity(&self, entity_id: &str) -> Result<()> {
         self.call_service("homeassistant", "update_entity", entity_id)
             .await
+    }
+}
+
+/// The drive half for one entity: the core's Set/Get as service calls.
+pub struct Handle {
+    conn: Arc<Connection>,
+    entity_id: String,
+}
+
+impl Handle {
+    pub fn new(conn: Arc<Connection>, entity_id: &str) -> Self {
+        Self {
+            conn,
+            entity_id: entity_id.to_string(),
+        }
+    }
+
+    /// `on_time_s` is ignored: no HA service takes a countdown, and the config
+    /// layer refuses `countdown` for this backend so the core never sends one.
+    pub async fn set(&self, on: bool, _on_time_s: Option<u32>) -> Result<()> {
+        let (domain, service) = service_for(&self.entity_id, on).with_context(|| {
+            format!(
+                "{}: nothing switches a {} entity",
+                self.entity_id,
+                domain(&self.entity_id)
+            )
+        })?;
+        self.conn
+            .call_service(domain, service, &self.entity_id)
+            .await
+    }
+
+    pub async fn get(&self) -> Result<()> {
+        self.conn.update_entity(&self.entity_id).await
+    }
+
+    pub fn describe(&self) -> String {
+        format!("homeassistant {}", self.entity_id)
     }
 }
 
