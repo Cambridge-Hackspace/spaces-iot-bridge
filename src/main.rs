@@ -13,6 +13,7 @@ use spaces_iot_bridge::config::{self, BackendKind, DeviceEntry};
 use spaces_iot_bridge::core::{Command, Device, DeviceConfig};
 use spaces_iot_bridge::ha;
 use spaces_iot_bridge::mqtt::{self, Connection, Delivered};
+use spaces_iot_bridge::sensor::{Sensor, SensorConfig};
 use spaces_iot_bridge::z2m;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -246,6 +247,43 @@ enum Input {
     Edge(Delivered),
 }
 
+/// What a device task drives: a plug, which the lease switches, or a sensor
+/// (#25), which the edge reads. Same four entry points; the loop below does
+/// not care which.
+enum Driven {
+    /// Boxed: a Device carries a spaces_device Module and is much the larger;
+    /// one allocation per device task is nothing.
+    Plug(Box<Device>),
+    Sensor(Sensor),
+}
+
+impl Driven {
+    fn tick(&mut self, now: u64) -> Vec<Command> {
+        match self {
+            Driven::Plug(d) => d.tick(now),
+            Driven::Sensor(s) => s.tick(now),
+        }
+    }
+    fn report(&mut self, r: spaces_iot_bridge::core::Report, now: u64) -> Vec<Command> {
+        match self {
+            Driven::Plug(d) => d.report(r, now),
+            Driven::Sensor(s) => s.report(r, now),
+        }
+    }
+    fn availability(&mut self, online: bool, now: u64) -> Vec<Command> {
+        match self {
+            Driven::Plug(d) => d.availability(online, now),
+            Driven::Sensor(s) => s.availability(online, now),
+        }
+    }
+    fn edge_message(&mut self, topic: &str, payload: &[u8], now: u64) -> Vec<Command> {
+        match self {
+            Driven::Plug(d) => d.edge_message(topic, payload, now),
+            Driven::Sensor(s) => s.edge_message(topic, payload, now),
+        }
+    }
+}
+
 async fn run_device(
     d: DeviceEntry,
     device_id: String,
@@ -253,14 +291,23 @@ async fn run_device(
     backend: Backend,
     edge: Arc<Connection>,
 ) {
-    let mut dev = Device::new(DeviceConfig {
-        device_id,
-        resource: d.resource.clone(),
-        countdown: d.countdown,
-        on_time_s: d.on_time_s,
-        rearm_s: d.rearm_s,
-        stop_on_loss: d.stop_resource_on_loss,
-    });
+    let mut dev = if d.role == "sensor" {
+        Driven::Sensor(Sensor::new(SensorConfig {
+            device_id,
+            resource: d.resource.clone(),
+            condition: d.condition().to_string(),
+            invert: d.invert,
+        }))
+    } else {
+        Driven::Plug(Box::new(Device::new(DeviceConfig {
+            device_id,
+            resource: d.resource.clone(),
+            countdown: d.countdown,
+            on_time_s: d.on_time_s,
+            rearm_s: d.rearm_s,
+            stop_on_loss: d.stop_resource_on_loss,
+        })))
+    };
     let epoch = Instant::now();
     let now = || epoch.elapsed().as_millis() as u64;
     // The Module notices a lapsed lease only when called; every ~50 ms keeps
