@@ -272,6 +272,8 @@ mod tests {
             ieee: None,
             entity: None,
             role: "power".into(),
+            condition: None,
+            invert: false,
             resource: format!("{name}-tool"),
             identity: "/nonexistent".into(),
             countdown: false,

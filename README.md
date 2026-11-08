@@ -70,9 +70,9 @@ a laser with no extraction.
 1. **`power`**: plugs, starting with the laser's fume extractor.
 2. **Home Assistant** as a second backend (#20): a lock, switch or light HA
    owns, driven as a `power` module -- the lock case is a door.
-3. Later: `sensor` (contact, leak or flow sensors feeding interlocks), once the
-   edge has a wire path for sensor conditions -- #20 established that today it
-   has none, only liveness; a stop from a button.
+3. **`sensor`** (#25): a Home Assistant `binary_sensor` -- a door contact, a
+   flow switch, a leak sensor -- feeding an interlock condition over the wire
+   CS:S #213 added. Zigbee2MQTT sensors and a stop from a button: later.
 
 ## Licence
 
@@ -160,9 +160,19 @@ gives the door its pulse, the power binding carries it out. Set
 scan-reply path.
 
 Domains the bridge drives as `power`: `lock` (unlocked = on), `switch`,
-`light`, `input_boolean`. A `binary_sensor` is not bridged yet: the edge has no
-wire for a sensor's *reading*, only its liveness, and a module that looks like
-a door contact and isn't would be worse than none ([#20](https://github.com/Cambridge-Hackspace/spaces-iot-bridge/issues/20)).
+`light`, `input_boolean`.
+
+**A `binary_sensor` is bridged as a `sensor` module** (#25), which the edge
+*reads* rather than drives: the bridge publishes the contact's reading as one
+named interlock condition (`condition = "door_open"` — the server's vocabulary)
+and the edge gates and trips on it (CS:S #213). Two rules, both about silence:
+an **unknown** sensor says nothing at all — no reading and no alive pulse — so a
+contact Home Assistant has lost reads to the edge as a sensor gone quiet, which
+denies the tool; and a change is reported **at once**, a steady state every few
+seconds, because a condition the edge has never observed denies until the first
+report. `invert = true` for a contact whose `on` is the safe state. A sensor
+ignores its lease; there is nothing to switch. Zigbee2MQTT sensors are not
+wired yet: their reading lives in a device-specific field nothing here names.
 
 ### What HA needs
 

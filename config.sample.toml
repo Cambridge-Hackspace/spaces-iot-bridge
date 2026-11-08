@@ -76,3 +76,23 @@ identity  = "/var/lib/spaces-iot-bridge/identities/workshop-door.toml"
 # A leased lock that HA cannot see for 10 s -> a `stop` on the door, which
 # ends the session and withdraws the lease: fail secure.
 stop_resource_on_loss = true
+
+# A door contact Home Assistant already has, as a SENSOR module (#25): its
+# reading feeds the `door_open` interlock on the resource it is bound to
+# (CS:S #213). It switches nothing and ignores its lease. Unknown is silent:
+# when HA cannot see the contact the bridge stops reporting AND stops pulsing
+# alive, so the edge's own silence detection denies the tool.
+[[device]]
+name      = "mill-door"
+backend   = "homeassistant"
+entity    = "binary_sensor.mill_door_contact"
+role      = "sensor"
+# Which condition this is the reading for. The edge accepts it only if an
+# enabled interlock rule on the resource names it.
+condition = "door_open"
+# HA's `on` for a door contact means OPEN, which is door_open asserted. A
+# contact wired the other way, or a requirement whose `on` is the bad state,
+# sets invert = true.
+invert    = false
+resource  = "mill"
+identity  = "/var/lib/spaces-iot-bridge/identities/mill-door.toml"

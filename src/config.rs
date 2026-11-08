@@ -72,7 +72,17 @@ pub struct DeviceEntry {
     /// Home Assistant's entity id, `lock.workshop_door`. Required for that
     /// backend, meaningless for the other.
     pub entity: Option<String>,
+    /// `power` or `sensor`.
     pub role: String,
+    /// For a `sensor`: the interlock condition its reading is for, from the
+    /// server's vocabulary (`door_open`, `flow_ok`, ...). Required for that
+    /// role, meaningless for `power`.
+    pub condition: Option<String>,
+    /// For a `sensor`: whether the backend's `on` means the condition is NOT
+    /// asserted. A door contact's `on` is open, which for `door_open` is
+    /// asserted; a contact wired the other way sets this.
+    #[serde(default)]
+    pub invert: bool,
     pub resource: String,
     /// Written by registration (#5). Holds `device_id` and `auth_token`.
     pub identity: PathBuf,
@@ -94,6 +104,13 @@ impl DeviceEntry {
         self.friendly
             .as_deref()
             .unwrap_or_else(|| panic!("{}: not a Zigbee2MQTT device", self.name))
+    }
+
+    /// The sensor's condition. `parse` has refused a sensor without one.
+    pub fn condition(&self) -> &str {
+        self.condition
+            .as_deref()
+            .unwrap_or_else(|| panic!("{}: not a sensor", self.name))
     }
 
     /// The Home Assistant entity id, likewise.
@@ -189,12 +206,27 @@ pub fn parse(text: &str) -> Result<Config> {
                 // The role decides what the entity must be able to do. A
                 // power module is driven, so its domain must have a service;
                 // a `climate` or a `sensor` under role power would be leased
-                // and never switch.
-                anyhow::ensure!(
-                    crate::ha::service_for(entity, true).is_some(),
-                    "device {}: entity {entity:?} is in a domain the bridge cannot switch (lock, switch, light, input_boolean)",
-                    d.name
-                );
+                // and never switch. A sensor module is read, so it must be a
+                // binary_sensor, and it must say which condition it reads.
+                match d.role.as_str() {
+                    "sensor" => {
+                        anyhow::ensure!(
+                            crate::ha::domain(entity) == "binary_sensor",
+                            "device {}: a sensor's entity must be a binary_sensor.*, not {entity:?}",
+                            d.name
+                        );
+                        anyhow::ensure!(
+                            d.condition.as_deref().is_some_and(|c| !c.is_empty()),
+                            "device {}: a sensor needs `condition` -- which interlock condition its reading is for (door_open, flow_ok, ...)",
+                            d.name
+                        );
+                    }
+                    _ => anyhow::ensure!(
+                        crate::ha::service_for(entity, true).is_some(),
+                        "device {}: entity {entity:?} is in a domain the bridge cannot switch (lock, switch, light, input_boolean)",
+                        d.name
+                    ),
+                }
                 // `bridge probe` measures a plug's countdown over Zigbee2MQTT and
                 // nothing measures a Home Assistant entity's, so none may be
                 // claimed: an unmeasured countdown is the fail-safe lie #209 is
@@ -206,9 +238,12 @@ pub fn parse(text: &str) -> Result<Config> {
                 );
             }
         }
+        // `sensor` is Home Assistant-only for now (#25): a Zigbee2MQTT
+        // contact's reading lives in a device-specific field (`contact`,
+        // `water_leak`, ...) that nothing here names yet.
         anyhow::ensure!(
-            d.role == "power",
-            "device {}: role {:?} is not supported yet (#1: power first)",
+            d.role == "power" || (d.role == "sensor" && d.backend == BackendKind::Homeassistant),
+            "device {}: role {:?} is not supported for this backend (power; sensor on homeassistant -- #25)",
             d.name,
             d.role
         );
@@ -254,7 +289,7 @@ mod tests {
         let cfg = parse(include_str!("../config.sample.toml")).expect("config.sample.toml");
         assert_eq!(cfg.server.url, "https://spaces.example.org");
         assert_eq!(cfg.iot.as_ref().unwrap().base, "zigbee2mqtt");
-        assert_eq!(cfg.devices.len(), 2);
+        assert_eq!(cfg.devices.len(), 3);
         let d = &cfg.devices[0];
         assert_eq!(d.name, "extractor");
         assert_eq!(d.backend, BackendKind::Zigbee2Mqtt);
@@ -276,6 +311,34 @@ mod tests {
             ha.token_file,
             PathBuf::from("/var/lib/spaces-iot-bridge/ha-token")
         );
+        // The third is the door contact, a sensor (#25).
+        let c = &cfg.devices[2];
+        assert_eq!(c.role, "sensor");
+        assert_eq!(c.entity(), "binary_sensor.mill_door_contact");
+        assert_eq!(c.condition(), "door_open");
+        assert!(!c.invert);
+        assert_eq!(declared_roles(c), vec!["sensor"]);
+    }
+
+    #[test]
+    fn a_sensor_is_refused_without_what_it_needs() {
+        // Each ensure for the role, driven one at a time (#25). The mutants
+        // are deleting them: a sensor with no condition would report nothing
+        // the edge can use; a lock under role sensor would be read as a
+        // contact; a Zigbee2MQTT sensor has no field named yet.
+        let sample = include_str!("../config.sample.toml");
+        let no_condition = sample.replace("condition = \"door_open\"", "");
+        let err = parse(&no_condition).expect_err("a sensor without a condition");
+        assert!(err.to_string().contains("condition"), "{err}");
+        let lock_as_sensor = sample.replace(
+            "entity    = \"binary_sensor.mill_door_contact\"",
+            "entity    = \"lock.mill_door\"",
+        );
+        let err = parse(&lock_as_sensor).expect_err("a lock is not a contact");
+        assert!(err.to_string().contains("binary_sensor"), "{err}");
+        let z2m_sensor = sample.replace("role      = \"power\"", "role      = \"sensor\"");
+        let err = parse(&z2m_sensor).expect_err("zigbee2mqtt sensors are not wired (#25)");
+        assert!(err.to_string().contains("sensor"), "{err}");
     }
 
     #[test]
@@ -325,7 +388,7 @@ mod tests {
         let ha_only =
             format!("{}{}", &sample[..start], &sample[end..]).replace("[iot]", "[iot_disabled]");
         let cfg = parse(&ha_only).expect("an HA-only bridge has no [iot]");
-        assert_eq!(cfg.devices.len(), 1);
+        assert_eq!(cfg.devices.len(), 2, "the lock and the door contact");
         assert!(cfg.iot.is_none());
     }
 
