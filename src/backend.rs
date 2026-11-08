@@ -35,6 +35,7 @@ pub enum Incoming {
 /// The drive half: how one device is told what to do.
 pub enum Backend {
     Zigbee2Mqtt(crate::z2m::Handle),
+    HomeAssistant(crate::ha::Handle),
 }
 
 impl Backend {
@@ -44,6 +45,7 @@ impl Backend {
     pub async fn set(&self, on: bool, on_time_s: Option<u32>) -> Result<()> {
         match self {
             Backend::Zigbee2Mqtt(h) => h.set(on, on_time_s).await,
+            Backend::HomeAssistant(h) => h.set(on, on_time_s).await,
         }
     }
 
@@ -51,6 +53,7 @@ impl Backend {
     pub async fn get(&self) -> Result<()> {
         match self {
             Backend::Zigbee2Mqtt(h) => h.get().await,
+            Backend::HomeAssistant(h) => h.get().await,
         }
     }
 
@@ -58,6 +61,7 @@ impl Backend {
     pub fn describe(&self) -> String {
         match self {
             Backend::Zigbee2Mqtt(h) => h.describe(),
+            Backend::HomeAssistant(h) => h.describe(),
         }
     }
 }

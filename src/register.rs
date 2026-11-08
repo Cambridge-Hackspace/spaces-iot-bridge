@@ -44,7 +44,7 @@ pub fn request_body(d: &DeviceEntry, invite: &str, mac: &str, version: &str) -> 
         // the thing that lets it fail safe at all.
         holds_last_on_disconnect: true,
     };
-    let caps = Capabilities::declared(&[d.role.as_str()], enforcement);
+    let caps = Capabilities::declared(&crate::config::declared_roles(d), enforcement);
     let req = RegisterRequest::new(caps, invite, &d.name, mac, version, "linux", None);
     serde_json::to_value(&req).expect("a RegisterRequest serialises")
 }
@@ -162,6 +162,33 @@ mod tests {
             v["mac_address"].as_str().unwrap().len() <= 17,
             "the column is VARCHAR(17)"
         );
+    }
+
+    #[test]
+    fn a_homeassistant_lock_registers_as_power_and_strike_with_no_countdown() {
+        // #20: the lock must carry the door's strike binding for its own lease
+        // to have any length, so it declares both roles. The mutant is
+        // `[d.role]` alone in request_body.
+        let tmp = tempdir();
+        let d = crate::config::parse(&include_str!("../config.sample.toml").replace(
+            "/var/lib/spaces-iot-bridge/identities/workshop-door.toml",
+            &tmp.join("workshop-door.toml").display().to_string(),
+        ))
+        .unwrap()
+        .devices
+        .remove(1);
+        let v = request_body(&d, "INVITE", "02:00:00:00:00:01", "0.1.0");
+        assert_eq!(
+            v["capabilities"],
+            serde_json::json!({
+                "roles": ["power", "strike"],
+                "local_inputs": [],
+                "local_inhibit": false,
+                "countdown": false,
+                "holds_last_on_disconnect": true,
+            })
+        );
+        assert_eq!(v["name"], "workshop-door");
     }
 
     #[test]

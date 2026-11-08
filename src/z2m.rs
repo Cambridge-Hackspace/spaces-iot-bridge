@@ -109,10 +109,13 @@ impl Router {
     pub fn new(base: &str, devices: &[DeviceEntry]) -> Self {
         let mut by_topic = HashMap::new();
         let mut friendly = HashMap::new();
-        for d in devices {
-            by_topic.insert(state_topic(base, &d.friendly), d.name.clone());
-            by_topic.insert(availability_topic(base, &d.friendly), d.name.clone());
-            friendly.insert(d.name.clone(), d.friendly.clone());
+        for d in devices
+            .iter()
+            .filter(|d| d.backend == crate::config::BackendKind::Zigbee2Mqtt)
+        {
+            by_topic.insert(state_topic(base, d.friendly()), d.name.clone());
+            by_topic.insert(availability_topic(base, d.friendly()), d.name.clone());
+            friendly.insert(d.name.clone(), d.friendly().to_string());
         }
         Self {
             base: base.to_string(),
@@ -265,8 +268,9 @@ mod tests {
         let mk = |name: &str, friendly: &str| DeviceEntry {
             name: name.into(),
             backend: crate::config::BackendKind::Zigbee2Mqtt,
-            friendly: friendly.into(),
+            friendly: Some(friendly.into()),
             ieee: None,
+            entity: None,
             role: "power".into(),
             resource: format!("{name}-tool"),
             identity: "/nonexistent".into(),
@@ -334,6 +338,22 @@ mod tests {
                 on: true,
                 retained: true
             })
+        );
+    }
+
+    #[test]
+    fn the_router_takes_only_the_zigbee2mqtt_devices_from_a_mixed_list() {
+        // The sample has an extractor on Zigbee2MQTT and a lock on Home
+        // Assistant. The mutant is a router that does not filter by backend:
+        // it then asks the lock for a friendly name it does not have.
+        let cfg = crate::config::parse(include_str!("../config.sample.toml")).unwrap();
+        let r = Router::new("zigbee2mqtt", &cfg.devices);
+        assert_eq!(
+            r.subscriptions(),
+            vec![
+                "zigbee2mqtt/hackspace/south_wall/plug/filters",
+                "zigbee2mqtt/hackspace/south_wall/plug/filters/availability",
+            ]
         );
     }
 
