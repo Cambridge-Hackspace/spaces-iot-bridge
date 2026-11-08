@@ -35,5 +35,13 @@ rustls = { version = "0.23", features = ["aws_lc_rs", "prefer-post-quantum"] }
 # The bridge host's own MAC, which is what registers: the platform's column is
 # 17 characters and a Zigbee IEEE address is 23 (#1 q2).
 mac_address = "1.1"
+# Home Assistant's WebSocket API (#20). No default features: `connect` and
+# `handshake` are the client, and the test fake's server side; the rustls
+# feature is for `wss://` behind a reverse proxy, with the public roots. It
+# pulls rustls with default features OFF, like reqwest does, so the provider is
+# the one `tls.rs` installs -- aws-lc-rs, post-quantum preferred -- and not a
+# second one chosen by a dependency.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1.36", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }

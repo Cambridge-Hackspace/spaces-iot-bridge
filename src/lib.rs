@@ -6,6 +6,7 @@
 pub mod backend;
 pub mod config;
 pub mod core;
+pub mod ha;
 pub mod mqtt;
 pub mod probe;
 pub mod register;

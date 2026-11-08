@@ -12,6 +12,9 @@ pub struct Config {
     pub server: Server,
     pub edge: Broker,
     pub iot: IotBroker,
+    /// Home Assistant, for devices with `backend = "homeassistant"` (#20).
+    /// Optional: a bridge with only Zigbee2MQTT devices never connects to it.
+    pub homeassistant: Option<HomeAssistant>,
     #[serde(rename = "device", default)]
     pub devices: Vec<DeviceEntry>,
 }
@@ -27,6 +30,15 @@ pub struct Server {
 pub struct Broker {
     pub broker: String,
     pub credentials: PathBuf,
+}
+
+/// Home Assistant's WebSocket API and the long-lived access token for it, in
+/// its own 0600 file holding the token and nothing else.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct HomeAssistant {
+    /// `ws://host:8123/api/websocket`, or `wss://` behind a reverse proxy.
+    pub url: String,
+    pub token_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -127,6 +139,21 @@ pub fn load_credentials(path: &Path) -> Result<Credentials> {
     toml::from_str(&text).with_context(|| format!("parsing credentials {}", path.display()))
 }
 
+/// The Home Assistant token: the file's contents, trimmed. A long-lived
+/// access token is one line; anything else in the file is a mistake worth
+/// refusing rather than sending.
+pub fn load_ha_token(path: &Path) -> Result<String> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the Home Assistant token {}", path.display()))?;
+    let token = text.trim();
+    anyhow::ensure!(
+        !token.is_empty() && !token.contains(char::is_whitespace),
+        "{}: expected one token and nothing else",
+        path.display()
+    );
+    Ok(token.to_string())
+}
+
 pub fn load_identity(path: &Path) -> Result<Identity> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading identity {} (register first: #5)", path.display()))?;
@@ -183,6 +210,41 @@ mod tests {
                 .backend,
             BackendKind::Zigbee2Mqtt
         );
+    }
+
+    #[test]
+    fn the_homeassistant_section_is_optional_and_parses_when_present() {
+        // The sample has no [homeassistant]; a Zigbee2MQTT-only bridge must
+        // keep parsing. And with the section present, both fields are read.
+        let without = parse(include_str!("../config.sample.toml")).unwrap();
+        assert_eq!(without.homeassistant, None);
+        let with = include_str!("../config.sample.toml").replace(
+            "[iot]",
+            "[homeassistant]\nurl = \"ws://ha.local:8123/api/websocket\"\ntoken_file = \"/etc/spaces-iot-bridge/ha-token\"\n\n[iot]",
+        );
+        let cfg = parse(&with).unwrap();
+        let ha = cfg.homeassistant.expect("[homeassistant] parsed");
+        assert_eq!(ha.url, "ws://ha.local:8123/api/websocket");
+        assert_eq!(
+            ha.token_file,
+            PathBuf::from("/etc/spaces-iot-bridge/ha-token")
+        );
+    }
+
+    #[test]
+    fn a_token_file_holds_one_token_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("bridge-ha-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("ok");
+        std::fs::write(&ok, "eyJhbGciOi.payload.sig\n").unwrap();
+        assert_eq!(load_ha_token(&ok).unwrap(), "eyJhbGciOi.payload.sig");
+        let two = dir.join("two");
+        std::fs::write(&two, "token-one\ntoken-two\n").unwrap();
+        assert!(load_ha_token(&two).is_err(), "two lines is not one token");
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "\n").unwrap();
+        assert!(load_ha_token(&empty).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
