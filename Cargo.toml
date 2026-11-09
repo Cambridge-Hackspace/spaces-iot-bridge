@@ -12,7 +12,7 @@ publish = false
 # The module protocol with no hardware and no I/O: wire types, registration,
 # the lease watchdog. Pinned to a tag, never a branch, so a build is a build of
 # something nameable. Public, so a reaper guest fetches it with no credential.
-spaces-device = { git = "https://github.com/Cambridge-Hackspace/spaces-firmware", tag = "v0.6.0" }
+spaces-device = { git = "https://github.com/Cambridge-Hackspace/spaces-firmware", tag = "v0.8.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

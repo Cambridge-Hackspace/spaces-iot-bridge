@@ -240,6 +240,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "css_wire"
+version = "0.1.0"
+source = "git+https://github.com/Cambridge-Hackspace/cooperative-systems-spaces?tag=css_wire-v0.1.0#444aa81e0f530537643238829e9419b9d8446f00"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1143,9 +1151,10 @@ dependencies = [
 
 [[package]]
 name = "spaces-device"
-version = "0.6.0"
-source = "git+https://github.com/Cambridge-Hackspace/spaces-firmware?tag=v0.6.0#a4b7ab8457a5848251a35d071115dfebf548e057"
+version = "0.8.0"
+source = "git+https://github.com/Cambridge-Hackspace/spaces-firmware?tag=v0.8.0#b2050cc785fa36e030e1bb8fe6a6bb16b27cdf30"
 dependencies = [
+ "css_wire",
  "serde",
  "serde_json",
 ]

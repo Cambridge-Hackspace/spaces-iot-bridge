@@ -9,12 +9,13 @@
 //! easiest to get wrong, and it is host-tested upstream. This file wraps it
 //! with what a *bridged* plug needs that a real module does not:
 //!
-//! 1. **`relay_on` is only ever what the plug said.** The Module's heartbeat
-//!    fills `relay_on` from its own commanded state -- it has a relay and knows
-//!    what it set. A bridge has no relay; it has a plug on another broker that
-//!    may or may not have obeyed. So every power report the Module emits is
-//!    rewritten from [`KnownState`] before it goes anywhere: `Some` only when
-//!    the plug has been heard from, `None` -- OMITTED on the wire -- when not.
+//! 1. **`relay_on` is only ever what the plug said.** By default a Module's
+//!    heartbeat fills `relay_on` from its own commanded state -- firmware with a
+//!    relay knows what it set. A bridge has no relay; it has a plug on another
+//!    broker that may or may not have obeyed. So the Module is told its relay
+//!    is remote, and is handed [`KnownState`] as an observation whenever it
+//!    changes (spaces-firmware #9): it reports `Some` only when the plug has
+//!    been heard from, `None` -- OMITTED on the wire -- when not.
 //!    The edge's stage-0 confirmation for the laser turns on that field, so an
 //!    optimistic `true` would fire the laser before extraction is running.
 //! 2. **A retained report is not the plug speaking.** The broker replays the
@@ -29,8 +30,7 @@
 //!    extractor failing mid-job is not caught by start stages. A leased plug
 //!    that goes Unknown or Off for the debounce gets a `stop` on its resource.
 
-use spaces_device::wire::{topic, PowerReport};
-use spaces_device::{Action, Config, Module, Output};
+use spaces_device::{Action, Config, Module, Observed, Output};
 
 /// What the bridge currently knows about a plug's relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +135,10 @@ impl Device {
         // The extractor follows the laser's lease; the laser's own box meters.
         // A second report of the same minutes would accumulate server-side.
         module_cfg.reports_usage = false;
+        // The relay is the plug's, on another broker, and may not have obeyed:
+        // Module reports only what the plug said (spaces-firmware #9), which is
+        // fed to it whenever `known` changes (`know`).
+        module_cfg.relay_is_remote = true;
         Self {
             cfg,
             module: Module::new(module_cfg),
@@ -186,7 +190,7 @@ impl Device {
                 }
             }
         }
-        self.known = known;
+        self.know(known);
         out.extend(self.housekeeping(now));
         out
     }
@@ -196,7 +200,7 @@ impl Device {
         let mut out = Vec::new();
         if !online && self.known != KnownState::Unknown {
             out.push(Command::Log("plug unavailable; state unknown".into()));
-            self.known = KnownState::Unknown;
+            self.know(KnownState::Unknown);
             self.expecting = None;
         }
         out.extend(self.housekeeping(now));
@@ -234,12 +238,6 @@ impl Device {
                 }
                 // A bridged plug drives no running sense and no latch.
                 Action::Set { .. } => {}
-                Action::Publish { topic, payload } if topic == topic::POWER_REPORT => {
-                    out.push(Command::Publish {
-                        topic,
-                        payload: self.rewrite_power_report(&payload),
-                    });
-                }
                 Action::Publish { topic, payload } => out.push(Command::Publish { topic, payload }),
                 Action::Note(s) => out.push(Command::Log(s)),
                 // A plug has no panel. Outcomes are session events, and a plug
@@ -250,22 +248,19 @@ impl Device {
         out
     }
 
-    /// Rule 1. The Module reports its commanded state; a bridge reports what
-    /// the plug said, and its draw is not the Module's two constants either.
-    fn rewrite_power_report(&self, payload: &str) -> String {
-        match serde_json::from_str::<PowerReport>(payload) {
-            Ok(mut r) => {
-                r.relay_on = relay_on(self.known);
-                // The Module's draw_idle/draw_running are stand-ins for a relay
-                // it owns. A plug's real reading, where it has one, is a later
-                // adapter concern; until then no claim is better than a made-up
-                // one -- the bypass detector believes a number.
-                r.draw_now = None;
-                serde_json::to_string(&r).expect("a PowerReport always serializes")
-            }
-            // Not ours to understand; pass it through rather than drop it.
-            Err(_) => payload.to_string(),
-        }
+    /// Rule 1: `relay_on` is only ever what the plug said. Recorded here and
+    /// handed to the Module, which reports exactly that and omits the field
+    /// while it is unknown (spaces-firmware #9). No draw: the Module's two
+    /// draw constants are stand-ins for a relay it owns, and a plug's real
+    /// reading, where it has one, is a later adapter concern -- until then no
+    /// claim is better than a made-up one, because the bypass detector
+    /// believes a number.
+    fn know(&mut self, known: KnownState) {
+        self.known = known;
+        self.module.observe(Observed {
+            relay_on: relay_on(known),
+            draw_now: None,
+        });
     }
 
     /// Rules 3 and 4, plus the confirm timeout. Run after every entry point.
@@ -282,7 +277,7 @@ impl Device {
                         if wanted { "ON" } else { "OFF" }
                     )));
                 }
-                self.known = KnownState::Unknown;
+                self.know(KnownState::Unknown);
             }
         }
 
@@ -333,6 +328,7 @@ impl Device {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spaces_device::wire::topic;
 
     fn cfg() -> DeviceConfig {
         DeviceConfig {
