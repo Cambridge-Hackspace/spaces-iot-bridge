@@ -28,7 +28,7 @@ A Spaces edge talks to the modules in its building over the `resource/*` topics
 on its local broker: card readers ask about badges, power modules report in and
 hold a lease, and a module whose lease stops being renewed switches itself off.
 Purpose-built firmware such as
-[spaces-toolguard-firmware](https://github.com/Cambridge-Hackspace/spaces-toolguard-firmware)
+[spaces-toolguard-device](https://github.com/Cambridge-Hackspace/spaces-toolguard-device)
 speaks that wire natively.
 
 An off-the-shelf device cannot. A Zigbee plug only understands
