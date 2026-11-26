@@ -1,6 +1,6 @@
 [package]
 name = "spaces-iot-bridge"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 license = "AGPL-3.0-or-later"
@@ -12,7 +12,16 @@ publish = false
 # The module protocol with no hardware and no I/O: wire types, registration,
 # the lease watchdog. Pinned to a tag, never a branch, so a build is a build of
 # something nameable. Public, so a reaper guest fetches it with no credential.
-spaces-device = { git = "https://github.com/Cambridge-Hackspace/spaces-firmware", tag = "v0.8.0" }
+spaces-device = { git = "https://github.com/Cambridge-Hackspace/spaces-firmware", tag = "v0.10.0" }
+# Signing the local wire (CS:S #249). A plug signs through spaces-device's
+# Module; a sensor has no Module and seals its own reports with css_wire_sign's
+# Peer, the same code the edge opens them with. Both by the ONE CS:S tag that
+# spaces-device v0.10.0 also uses, so cargo builds a single css_wire and the
+# seal traits on both sides are the same traits.
+css_wire = { git = "https://github.com/Cambridge-Hackspace/cooperative-systems-spaces", tag = "v0.6.0" }
+css_wire_sign = { git = "https://github.com/Cambridge-Hackspace/cooperative-systems-spaces", tag = "v0.6.0" }
+# Each end's nonce for the local wire: 16 bytes from the OS.
+getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

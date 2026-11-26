@@ -11,5 +11,6 @@ pub mod mqtt;
 pub mod probe;
 pub mod register;
 pub mod sensor;
+pub mod signing;
 pub mod tls;
 pub mod z2m;

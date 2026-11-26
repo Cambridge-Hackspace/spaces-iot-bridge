@@ -150,6 +150,21 @@ impl Device {
         }
     }
 
+    /// Sign the local wire with this device's command key (CS:S #249): every
+    /// report goes out sealed, and no lease counts unless the edge sealed it
+    /// for this device.
+    pub fn signing(mut self, key: &str) -> Self {
+        self.module = self
+            .module
+            .signing(key.as_bytes().to_vec(), crate::signing::nonce);
+        self
+    }
+
+    /// Whether this device signs the local wire.
+    pub fn signs(&self) -> bool {
+        self.module.signs()
+    }
+
     pub fn known(&self) -> KnownState {
         self.known
     }
@@ -366,6 +381,64 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // --- signing the local wire (CS:S #249) -----------------------------
+
+    const KEY: &str = "plug-command-key";
+
+    /// The edge's view of one plug: opens what it hears, seals what it sends.
+    fn edge_hears(edge: &mut css_wire_sign::Peer, cmds: &[Command]) {
+        for c in cmds {
+            if let Command::Publish { topic, payload } = c {
+                if *topic == topic::POWER_REPORT {
+                    let m: spaces_device::wire::LocalPower = serde_json::from_str(payload).unwrap();
+                    assert!(m.seal.is_some(), "the plug reported unsigned: {payload}");
+                    let _ = edge.open(KEY.as_bytes(), &m, || "edge-n2".into());
+                }
+            }
+        }
+    }
+
+    fn sealed_lease(edge: &mut css_wire_sign::Peer) -> Vec<u8> {
+        let mut l: spaces_device::wire::Lease = serde_json::from_str(
+            r#"{"device_id":"dev-1","grant":true,"ttl_ms":3000,"resource":"laser"}"#,
+        )
+        .unwrap();
+        edge.seal(KEY.as_bytes(), &mut l);
+        serde_json::to_vec(&l).unwrap()
+    }
+
+    #[test]
+    fn a_signing_plug_takes_no_unsigned_lease_and_takes_its_edges_sealed_one() {
+        // The mutant is `signing` not keeping the signing module: the plug
+        // would then report unsigned and switch on anyone's lease.
+        let mut dev = Device::new(cfg()).signing(KEY);
+        assert!(dev.signs());
+        let mut edge = css_wire_sign::Peer::new("edge-n1".into());
+
+        // Anyone on the edge broker can publish this. It switches nothing.
+        let out = lease(&mut dev, true, 100);
+        assert!(!dev.leased(), "an unsigned lease was taken: {out:?}");
+        assert!(sets(&out).is_empty(), "{out:?}");
+
+        // The plug's own sealed report introduces it to the edge ...
+        let mut t = 150;
+        let mut heard = Vec::new();
+        while t <= 2_000 {
+            heard.extend(dev.tick(t));
+            t += 50;
+        }
+        edge_hears(&mut edge, &heard);
+        assert!(
+            edge.theirs().is_some(),
+            "the edge never heard a sealed report"
+        );
+
+        // ... and the edge's lease, sealed to it, is believed.
+        let out = dev.edge_message(topic::LEASE, &sealed_lease(&mut edge), 2_050);
+        assert!(dev.leased(), "the edge's sealed lease was refused: {out:?}");
+        assert_eq!(sets(&out).first().map(|s| s.0), Some(true), "{out:?}");
     }
 
     // --- rule 2, seeded with the scaffold -------------------------------

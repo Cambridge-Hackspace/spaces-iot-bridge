@@ -74,13 +74,22 @@ pub async fn register(server_url: &str, d: &DeviceEntry, invite: &str) -> Result
         .bytes()
         .await
         .context("reading the registration reply")?;
-    let registered = parse_reply(status, &bytes).map_err(anyhow::Error::msg)?;
-    let identity = Identity {
-        device_id: registered.device_id,
-        auth_token: registered.auth_token,
-    };
+    let identity = identity_from(status, &bytes)?;
     persist(&d.identity, &identity)?;
     Ok(identity)
+}
+
+/// The identity a registration reply gives: the device, its token, and the
+/// command key it signs the local wire with when the server minted one
+/// (CS:S #249). Pure, so the reply's shape is tested without a server.
+pub fn identity_from(status: u16, body: &[u8]) -> Result<Identity> {
+    let registered = parse_reply(status, body).map_err(anyhow::Error::msg)?;
+    Ok(Identity {
+        command_key: spaces_device::registration::command_key(&registered.mqtt_config)
+            .map(str::to_owned),
+        device_id: registered.device_id,
+        auth_token: registered.auth_token,
+    })
 }
 
 /// Write the identity file, 0600, creating its directory. Refuses an existing
@@ -198,6 +207,7 @@ mod tests {
         let id = Identity {
             device_id: "dev-1".into(),
             auth_token: "tok".into(),
+            command_key: Some("k-1".into()),
         };
         persist(&path, &id).unwrap();
         let back = crate::config::load_identity(&path).unwrap();
@@ -213,6 +223,7 @@ mod tests {
         let other = Identity {
             device_id: "dev-2".into(),
             auth_token: "tok2".into(),
+            command_key: None,
         };
         let err = persist(&path, &other).expect_err("must refuse");
         assert!(err.to_string().contains("not overwriting"), "{err}");
@@ -221,6 +232,44 @@ mod tests {
             id,
             "the first identity survives"
         );
+    }
+
+    #[test]
+    fn the_command_key_from_the_reply_is_kept_and_an_absent_one_is_none() {
+        // The mutant is the bridge as it was: device_id and token kept, the
+        // reply's command key dropped, every bridged device running unsigned.
+        let reply = |cfg: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "success": true,
+                "data": {"device_id": "dev-1", "auth_token": "tok", "mqtt_config": cfg}
+            }))
+            .unwrap()
+        };
+        let keyed = reply(serde_json::json!({
+            "mqtt_instance_url": "mqtt://edge:1883",
+            "mqtt_namespace": "spaces",
+            "command_key": "ab12"
+        }));
+        let id = identity_from(200, &keyed).unwrap();
+        assert_eq!(id.command_key.as_deref(), Some("ab12"));
+        assert_eq!(
+            (id.device_id.as_str(), id.auth_token.as_str()),
+            ("dev-1", "tok")
+        );
+        // A server with no cipher mints no key: unsigned, and said so at run.
+        let unkeyed = reply(serde_json::json!({"mqtt_namespace": "spaces"}));
+        assert_eq!(identity_from(200, &unkeyed).unwrap().command_key, None);
+    }
+
+    #[test]
+    fn an_identity_written_before_the_key_was_kept_still_loads() {
+        // Every bridge registered before this change has exactly this file.
+        let tmp = tempdir();
+        let path = tmp.join("old.toml");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(&path, "device_id = \"dev-1\"\nauth_token = \"tok\"\n").unwrap();
+        let id = crate::config::load_identity(&path).unwrap();
+        assert_eq!(id.command_key, None);
     }
 
     fn tempdir() -> std::path::PathBuf {

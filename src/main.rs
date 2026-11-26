@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
                 d.entity(),
             )),
         };
-        tokio::spawn(run_device(d, identity.device_id, rx, backend, edge.clone()));
+        tokio::spawn(run_device(d, identity, rx, backend, edge.clone()));
     }
 
     // Routing. IoT messages go to the one device whose topic it is, already
@@ -251,13 +251,21 @@ enum Input {
 /// (#25), which the edge reads. Same four entry points; the loop below does
 /// not care which.
 enum Driven {
-    /// Boxed: a Device carries a spaces_device Module and is much the larger;
-    /// one allocation per device task is nothing.
+    /// Both boxed: a Device carries a spaces_device Module and a signing
+    /// Sensor its end of the wire, and the two differ widely in size; one
+    /// allocation per device task is nothing.
     Plug(Box<Device>),
-    Sensor(Sensor),
+    Sensor(Box<Sensor>),
 }
 
 impl Driven {
+    fn signing(self, key: &str) -> Self {
+        match self {
+            Driven::Plug(d) => Driven::Plug(Box::new(d.signing(key))),
+            Driven::Sensor(s) => Driven::Sensor(Box::new(s.signing(key))),
+        }
+    }
+
     fn tick(&mut self, now: u64) -> Vec<Command> {
         match self {
             Driven::Plug(d) => d.tick(now),
@@ -286,18 +294,19 @@ impl Driven {
 
 async fn run_device(
     d: DeviceEntry,
-    device_id: String,
+    identity: config::Identity,
     mut rx: mpsc::Receiver<Input>,
     backend: Backend,
     edge: Arc<Connection>,
 ) {
+    let device_id = identity.device_id;
     let mut dev = if d.role == "sensor" {
-        Driven::Sensor(Sensor::new(SensorConfig {
+        Driven::Sensor(Box::new(Sensor::new(SensorConfig {
             device_id,
             resource: d.resource.clone(),
             condition: d.condition().to_string(),
             invert: d.invert,
-        }))
+        })))
     } else {
         Driven::Plug(Box::new(Device::new(DeviceConfig {
             device_id,
@@ -308,6 +317,19 @@ async fn run_device(
             stop_on_loss: d.stop_resource_on_loss,
         })))
     };
+    // Signing the local wire (CS:S #249), with the key registration gave.
+    match identity.command_key.as_deref() {
+        Some(key) => {
+            dev = dev.signing(key);
+            info!("{}: signing the local wire with its command key", d.name);
+        }
+        None => warn!(
+            "{}: no command key in its identity, so the local wire is unsigned and \
+             anyone who can publish on the edge broker can lease it; an identity \
+             written before spaces-iot-bridge 0.4.0 has none -- see the README",
+            d.name
+        ),
+    }
     let epoch = Instant::now();
     let now = || epoch.elapsed().as_millis() as u64;
     // The Module notices a lapsed lease only when called; every ~50 ms keeps

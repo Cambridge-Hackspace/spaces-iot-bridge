@@ -111,6 +111,19 @@ this repository; all are `0600`:
    This writes the identity file and refuses to run again while it exists.
    Nothing re-registers on its own; replacing a live identity would orphan every
    binding to the old `device_id`.
+
+   The identity file also keeps the device's **command key** from the reply,
+   and the device signs the local wire with it (CS:S #249). A plug reports
+   sealed and takes no lease its edge did not seal for it. A sensor seals its
+   condition and alive reports, so an edge that requires signed messages on its
+   resource still hears it. **Upgrade the edge first, to CS:S v0.6.1 or later**:
+   an older edge seals nothing, so a signing plug takes none of its leases.
+
+   An identity written before 0.4.0 has no key. The server minted one, but this
+   bridge dropped it from the reply, and no endpoint hands it out again. Such a
+   device runs unsigned and logs a warning at start (`no command key in its
+   identity`). To sign it, re-register it with a new invite and bind the new
+   `device_id` in place of the old one.
 4. **Bind it** on the platform, in Resource Wiring, as `power` on its resource.
    For the extractor: start stage 0, `fail_off` on disconnect; the laser's own
    box at stage 1 with a spin-up delay. The edge will not lease the laser until
@@ -131,6 +144,8 @@ hides for weeks; this service is built not to have one.
 | `plug unavailable; state unknown` | Zigbee2MQTT says the plug left the mesh |
 | `no report within 5000 ms of ON; state unknown` | the plug did not answer a command |
 | `leased but not On for 10000 ms; stopping <resource>` | stop-on-loss fired |
+| `no command key in its identity` | an identity from before 0.4.0: this device's local wire is unsigned; see step 3 |
+| `… not believed: Unsigned` | a sensor was sent an unsigned hello or lease: a forgery, or an edge older than CS:S 0.6.1 |
 | `WebSocket`/`connection error … retrying` | a broker is unreachable; the plug's countdown is holding the line |
 
 ## Home Assistant (#20)
