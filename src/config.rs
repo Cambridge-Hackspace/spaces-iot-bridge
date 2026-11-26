@@ -154,6 +154,12 @@ pub struct Credentials {
 pub struct Identity {
     pub device_id: String,
     pub auth_token: String,
+    /// The device's command key, from its registration reply (CS:S #120,
+    /// #249): what it signs the local wire with. Absent from an identity
+    /// written before this bridge kept it -- the server minted one then too,
+    /// but the reply's copy was dropped -- and such a device runs unsigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_key: Option<String>,
 }
 
 /// `mqtt://host:port` -> (host, port). Only that scheme, only that shape:

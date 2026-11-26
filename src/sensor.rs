@@ -22,7 +22,9 @@
 //!    what makes a resting sensor count; the immediate report is what makes a
 //!    trip prompt.
 
-use spaces_device::wire::{topic, AliveRequest, ConditionReport};
+use css_wire::seal::Sealed;
+use css_wire_sign::{Peer, Refused};
+use spaces_device::wire::{topic, AliveRequest, ConditionReport, Lease, LocalHello};
 
 use crate::core::{Command, Report};
 
@@ -53,6 +55,8 @@ pub struct Sensor {
     known: Option<bool>,
     last_alive: Option<u64>,
     last_report: Option<u64>,
+    /// The command key and this end of the wire, once [`Sensor::signing`].
+    seals: Option<(Vec<u8>, Peer)>,
 }
 
 impl Sensor {
@@ -62,7 +66,22 @@ impl Sensor {
             known: None,
             last_alive: None,
             last_report: None,
+            seals: None,
         }
+    }
+
+    /// Seal every report with this device's command key (CS:S #249). The
+    /// edge opens a sealed condition only when it names the edge's current
+    /// nonce, which a sensor learns from what the edge seals for it -- its
+    /// hello, and the leases a sensor binding is sent anyway.
+    pub fn signing(mut self, key: &str) -> Self {
+        self.seals = Some((key.as_bytes().to_vec(), Peer::new(crate::signing::nonce())));
+        self
+    }
+
+    /// Whether this sensor signs its reports.
+    pub fn signs(&self) -> bool {
+        self.seals.is_some()
     }
 
     /// The condition as last known: `None` is unknown, and unknown is silent.
@@ -111,9 +130,36 @@ impl Sensor {
         vec![]
     }
 
-    /// Leases arrive for a sensor binding too. There is nothing to switch.
-    pub fn edge_message(&mut self, _topic: &str, _payload: &[u8], _now: u64) -> Vec<Command> {
-        vec![]
+    /// Leases arrive for a sensor binding too. There is nothing to switch, so
+    /// for a sensor that signs they are only how it learns the edge's nonce,
+    /// as its hello is. Once the edge is newly known the condition goes out
+    /// again at once: one sealed before was stale to that edge and dropped,
+    /// and a door left open must not wait for the timer to be heard.
+    pub fn edge_message(&mut self, topic_name: &str, payload: &[u8], _now: u64) -> Vec<Command> {
+        let Some((key, peer)) = self.seals.as_mut() else {
+            return vec![];
+        };
+        let mine = self.cfg.device_id.as_str();
+        let before = peer.theirs().map(str::to_owned);
+        let opened = if topic_name == topic::HELLO {
+            learn::<LocalHello>(key, peer, payload, |m| m.device_id == mine)
+        } else if topic_name == topic::LEASE {
+            learn::<Lease>(key, peer, payload, |m| m.device_id == mine)
+        } else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        if let Some(why) = opened {
+            out.push(Command::Log(format!("{topic_name} not believed: {why:?}")));
+        }
+        if peer.theirs().map(str::to_owned) != before {
+            if let Some(asserted) = self.known {
+                self.last_report = None;
+                out.push(Command::Log("edge newly known; reporting again".into()));
+                out.push(self.condition_report(asserted));
+            }
+        }
+        out
     }
 
     pub fn tick(&mut self, now: u64) -> Vec<Command> {
@@ -128,10 +174,10 @@ impl Sensor {
             self.last_alive = Some(now);
             out.push(Command::Publish {
                 topic: topic::ALIVE_REQUEST,
-                payload: serde_json::to_string(&AliveRequest {
+                payload: self.sealed(AliveRequest {
                     device_id: self.cfg.device_id.clone(),
-                })
-                .expect("an AliveRequest serialises"),
+                    seal: None,
+                }),
             });
         }
         if self
@@ -144,17 +190,48 @@ impl Sensor {
         out
     }
 
-    fn condition_report(&self, asserted: bool) -> Command {
+    fn condition_report(&mut self, asserted: bool) -> Command {
+        let report = ConditionReport {
+            device_id: self.cfg.device_id.clone(),
+            resource: self.cfg.resource.clone(),
+            condition: self.cfg.condition.clone(),
+            asserted,
+            seal: None,
+        };
         Command::Publish {
             topic: topic::CONDITION_REQUEST,
-            payload: serde_json::to_string(&ConditionReport {
-                device_id: self.cfg.device_id.clone(),
-                resource: self.cfg.resource.clone(),
-                condition: self.cfg.condition.clone(),
-                asserted,
-            })
-            .expect("a ConditionReport serialises"),
+            payload: self.sealed(report),
         }
+    }
+
+    /// `msg` as JSON, sealed when this sensor signs.
+    fn sealed<M: Sealed + serde::Serialize>(&mut self, mut msg: M) -> String {
+        if let Some((key, peer)) = self.seals.as_mut() {
+            peer.seal(key, &mut msg);
+        }
+        serde_json::to_string(&msg).expect("a local message serialises")
+    }
+}
+
+/// Open one message from the edge to learn its nonce. `None` when there is
+/// nothing to say: it is for another device (every device sees every lease),
+/// it does not parse, it was believed, or it was stale -- which is how a first
+/// message from an edge that has not yet heard this sensor arrives, and still
+/// teaches its nonce. `Some` for a message to this sensor that is unsigned or
+/// badly signed: a forgery, or an edge older than CS:S 0.6.1.
+fn learn<M: Sealed + serde::de::DeserializeOwned>(
+    key: &[u8],
+    peer: &mut Peer,
+    payload: &[u8],
+    named: impl Fn(&M) -> bool,
+) -> Option<Refused> {
+    let msg: M = serde_json::from_slice(payload).ok()?;
+    if !named(&msg) {
+        return None;
+    }
+    match peer.open(key, &msg, crate::signing::nonce) {
+        Ok(()) | Err(Refused::Stale) => None,
+        Err(why) => Some(why),
     }
 }
 
@@ -304,5 +381,96 @@ mod tests {
             10,
         );
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    // --- signing the local wire (CS:S #249) -----------------------------
+
+    const KEY: &str = "sensor-command-key";
+
+    fn condition(payload: &str) -> spaces_device::wire::ConditionReport {
+        serde_json::from_str(payload).unwrap()
+    }
+
+    fn hello_for(edge: &mut Peer, device_id: &str) -> Vec<u8> {
+        let mut h = LocalHello {
+            device_id: device_id.into(),
+            seal: None,
+        };
+        edge.seal(KEY.as_bytes(), &mut h);
+        serde_json::to_vec(&h).unwrap()
+    }
+
+    #[test]
+    fn a_signing_sensor_seals_and_reports_again_as_soon_as_it_knows_its_edge() {
+        // The mutants: `sealed` not sealing (the edge drops every reading on a
+        // signed resource and denies the tool); `edge_message` not learning
+        // (every reading stays stale to the edge for good); and no immediate
+        // re-report (an open door waits for the timer to be heard).
+        let mut s = Sensor::new(cfg(false)).signing(KEY);
+        assert!(s.signs());
+        let mut edge = Peer::new("edge-n1".into());
+
+        // Before the edge is known: sealed, signed, but stale to the edge --
+        // which still teaches the edge this sensor's nonce.
+        let first = s.report(live(true), 100);
+        let report = condition(published(&first, topic::CONDITION_REQUEST)[0]);
+        assert!(report.seal.is_some(), "the reading went out unsigned");
+        assert_eq!(
+            edge.open(KEY.as_bytes(), &report, || "edge-n2".into()),
+            Err(Refused::Stale)
+        );
+
+        // The edge's hello for ANOTHER device teaches nothing and sends nothing.
+        let out = s.edge_message(topic::HELLO, &hello_for(&mut edge, "dev-other"), 150);
+        assert!(
+            published(&out, topic::CONDITION_REQUEST).is_empty(),
+            "{out:?}"
+        );
+
+        // Its hello for this one: the reading goes out again at once, fresh.
+        let out = s.edge_message(topic::HELLO, &hello_for(&mut edge, "dev-s"), 200);
+        let again = published(&out, topic::CONDITION_REQUEST);
+        assert_eq!(again.len(), 1, "no immediate re-report: {out:?}");
+        edge.open(KEY.as_bytes(), &condition(again[0]), || "edge-n2".into())
+            .expect("the edge opens the reading sent once it was known");
+
+        // And alive, on the timer, is sealed and fresh too.
+        let out = run(&mut s, 250, 1_300);
+        let alive: spaces_device::wire::AliveRequest =
+            serde_json::from_str(published(&out, topic::ALIVE_REQUEST)[0]).unwrap();
+        edge.open(KEY.as_bytes(), &alive, || "edge-n2".into())
+            .expect("the edge opens the sealed alive");
+    }
+
+    #[test]
+    fn an_unsigned_hello_is_logged_and_teaches_nothing() {
+        let mut s = Sensor::new(cfg(false)).signing(KEY);
+        s.report(live(true), 100);
+        let forged = serde_json::to_vec(&LocalHello {
+            device_id: "dev-s".into(),
+            seal: None,
+        })
+        .unwrap();
+        let out = s.edge_message(topic::HELLO, &forged, 150);
+        assert!(
+            published(&out, topic::CONDITION_REQUEST).is_empty(),
+            "{out:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|c| matches!(c, Command::Log(l) if l.contains("Unsigned"))),
+            "a forged hello went unremarked: {out:?}"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_sensor_reports_exactly_as_before() {
+        // No key: no seal field at all, so an edge older than CS:S 0.6.1
+        // reads what it always read.
+        let mut s = Sensor::new(cfg(false));
+        let first = s.report(live(true), 100);
+        let v: serde_json::Value =
+            serde_json::from_str(published(&first, topic::CONDITION_REQUEST)[0]).unwrap();
+        assert!(v.get("seal").is_none(), "{v}");
     }
 }
